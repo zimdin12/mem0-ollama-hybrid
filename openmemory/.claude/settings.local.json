@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker exec:*)",
+      "Bash(docker restart:*)",
+      "Bash(docker-compose restart:*)",
+      "Bash(docker-compose:*)",
+      "Bash(docker-compose up:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.mem0.ai)",
+      "Bash(git checkout:*)",
+      "Bash(grep:*)"
+    ],
+    "deny": []
+  }
+}

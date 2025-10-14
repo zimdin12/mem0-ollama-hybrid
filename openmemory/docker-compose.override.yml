@@ -1,0 +1,118 @@
+services:
+  # ADD THIS SECTION - Put mem0_store on the network
+  mem0_store:
+    networks:
+      - openmemory_network
+    healthcheck:
+      test: ["CMD-SHELL", "command -v curl >/dev/null && curl -f http://localhost:6333/collections || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 15s  # Give time for curl install + Qdrant startup
+    volumes:
+      - ./init-qdrant.sh:/docker-entrypoint-initdb.d/init-qdrant.sh:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "=========================================="
+        echo "Installing curl..."
+        echo "=========================================="
+        apt-get update && apt-get install -y curl
+        
+        echo ""
+        echo "Starting Qdrant in background..."
+        /qdrant/qdrant &
+        QDRANT_PID=$!
+        
+        echo "Waiting 5 seconds for Qdrant to initialize..."
+        sleep 5
+        
+        echo ""
+        echo "Running init script..."
+        sh /docker-entrypoint-initdb.d/init-qdrant.sh
+        echo ""
+        echo "Init script completed."
+        
+        echo ""
+        echo "Keeping Qdrant running..."
+        wait $QDRANT_PID
+
+  # Neo4j graph database (for relationships)
+  neo4j:
+    image: neo4j:5.26.4
+    ports:
+      - "8474:7474"  # HTTP
+      - "8687:7687"  # Bolt
+    volumes:
+      - neo4j_data:/data
+    environment:
+      - NEO4J_AUTH=neo4j/openmemory
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_apoc_export_file_enabled=true
+      - NEO4J_apoc_import_file_enabled=true
+      - NEO4J_apoc_import_file_use__neo4j__config=true
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider localhost:7474 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    networks:
+      - openmemory_network
+
+  # PostgreSQL (optional)
+#  postgres:
+#    image: ankane/pgvector:v0.5.1
+#    restart: on-failure
+#    shm_size: "128mb"
+#    environment:
+#      - POSTGRES_USER=mem0
+#      - POSTGRES_PASSWORD=openmemory
+#    healthcheck:
+#      test: ["CMD", "pg_isready", "-q", "-d", "postgres", "-U", "mem0"]
+#      interval: 5s
+#      timeout: 5s
+#      retries: 5
+#    volumes:
+#      - postgres_db:/var/lib/postgresql/data
+#    ports:
+#      - "8432:5432"
+#    networks:
+#      - openmemory_network
+
+  # OpenMemory MCP API Server
+  openmemory-mcp:
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      mem0_store:  # ⬅️ Add this dependency back!
+        condition: service_healthy
+    networks:
+      - openmemory_network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      sh -c "pip install psycopg2-binary 2>/dev/null || true && uvicorn main:app --host 0.0.0.0 --port 8765 --reload"
+
+  # OpenMemory UI Dashboard
+  openmemory-ui:
+    build:
+      context: ui/
+      args:
+        - NEXT_PUBLIC_API_URL=http://192.168.100.10:8765
+        - NEXT_PUBLIC_USER_ID=steven
+    environment:
+      - NEXT_PUBLIC_API_URL=http://192.168.100.10:8765
+      - NEXT_PUBLIC_USER_ID=steven
+    depends_on:
+      - openmemory-mcp
+    networks:
+      - openmemory_network
+
+volumes:
+  neo4j_data:
+  postgres_db:
+
+networks:
+  openmemory_network:
+    driver: bridge

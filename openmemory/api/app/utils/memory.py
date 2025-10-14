@@ -40,6 +40,148 @@ from mem0 import Memory
 _memory_client = None
 _config_hash = None
 
+# ========================================================================
+# ESSENTIAL FIX FOR OLLAMA + MEM0 COMPATIBILITY
+# ========================================================================
+
+def _apply_essential_ollama_fix():
+    """Essential fix: ensure OllamaLLM returns strings, not dicts"""
+    try:
+        from mem0.llms.ollama import OllamaLLM
+        from functools import wraps
+        import json
+        
+        if not hasattr(OllamaLLM, 'generate_response'):
+            return False
+        
+        original_generate = OllamaLLM.generate_response
+        
+        def _parse_content_to_tool_calls(content, tools):
+            """Parse qwen3:4b content into mem0-expected tool_calls format"""
+            import json
+            import re
+            
+            tool_calls = []
+            
+            if not tools or not content:
+                return tool_calls
+            
+            try:
+                # Try to parse as JSON first
+                if content.strip().startswith('{'):
+                    parsed = json.loads(content)
+                    
+                    # Look for entities in the parsed JSON
+                    if 'entities' in parsed:
+                        entities = parsed['entities']
+                        
+                        # Convert to proper format for extract_entities tool
+                        for tool in tools:
+                            if tool.get('function', {}).get('name') == 'extract_entities':
+                                tool_calls.append({
+                                    'name': 'extract_entities',
+                                    'arguments': {
+                                        'entities': [
+                                            {
+                                                'entity': ent.get('entity', ent) if isinstance(ent, dict) else ent,
+                                                'entity_type': ent.get('type', 'MISC') if isinstance(ent, dict) else 'MISC'
+                                            }
+                                            for ent in entities
+                                        ]
+                                    }
+                                })
+                                break
+                            elif tool.get('function', {}).get('name') == 'establish_relationships':
+                                # Handle relationship extraction
+                                if 'relationships' in parsed:
+                                    relationships = parsed.get('relationships', [])
+                                    tool_calls.append({
+                                        'name': 'establish_relationships',
+                                        'arguments': {
+                                            'entities': [
+                                                {
+                                                    'source': rel.get('subject', rel.get('source', 'unknown')),
+                                                    'relationship': rel.get('predicate', rel.get('relationship', 'related_to')),
+                                                    'destination': rel.get('object', rel.get('target', rel.get('destination', 'unknown')))
+                                                }
+                                                for rel in relationships
+                                            ]
+                                        }
+                                    })
+                else:
+                    # Try to extract entities from text format
+                    lines = content.split('\n')
+                    entities = []
+                    
+                    for line in lines:
+                        # Look for patterns like "- Sarah Johnson: Person"
+                        match = re.match(r'-\s*([^:]+):\s*(.+)', line.strip())
+                        if match:
+                            entity = match.group(1).strip()
+                            entity_type = match.group(2).strip()
+                            entities.append({
+                                'entity': entity,
+                                'entity_type': entity_type
+                            })
+                    
+                    if entities:
+                        for tool in tools:
+                            if tool.get('function', {}).get('name') == 'extract_entities':
+                                tool_calls.append({
+                                    'name': 'extract_entities',
+                                    'arguments': {'entities': entities}
+                                })
+                                break
+                                
+            except Exception as e:
+                print(f"⚠️  Tool call parsing error: {e}")
+            
+            return tool_calls
+        
+        @wraps(original_generate)
+        def string_response_generate(self, messages, response_format=None, tools=None, tool_choice='auto', **kwargs):
+            result = original_generate(self, messages=messages, response_format=response_format, tools=tools, tool_choice=tool_choice, **kwargs)
+            
+            # The key insight: if tools are provided, this is for entity extraction (return dict)
+            # If no tools, this is for fact extraction (return string)
+            
+            if tools is not None:
+                # Entity extraction pipeline - need to create proper tool_calls format
+                if isinstance(result, dict):
+                    if 'tool_calls' not in result or not result['tool_calls']:
+                        # Parse the content and create tool_calls format
+                        content = result.get('content', '')
+                        if content:
+                            tool_calls = _parse_content_to_tool_calls(content, tools)
+                            result['tool_calls'] = tool_calls
+                    return result
+                else:
+                    # Parse string content and create tool_calls
+                    tool_calls = _parse_content_to_tool_calls(str(result), tools)
+                    return {
+                        'content': str(result),
+                        'tool_calls': tool_calls
+                    }
+            else:
+                # Fact extraction pipeline - return strings (fixes the strip error)
+                if isinstance(result, dict) and 'content' in result:
+                    return result['content']  # Return just the content string
+                elif isinstance(result, dict):
+                    return json.dumps(result)  # Convert dict to JSON string
+                else:
+                    return str(result)  # Ensure it's a string
+        
+        OllamaLLM.generate_response = string_response_generate
+        print("✅ Applied essential Ollama fix")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Failed to apply essential fix: {e}")
+        return False
+
+# Apply the essential fix
+_apply_essential_ollama_fix()
+
 
 def _get_config_hash(config_dict):
     """Generate a hash of the config to detect changes."""
@@ -308,19 +450,62 @@ def get_memory_client(custom_instructions: str = None):
         # Variable to track custom instructions
         db_custom_instructions = None
         
-        # Load configuration from database
+        # TRY TO LOAD FROM config.json FIRST
+        config_loaded_from = "defaults"
+        try:
+            with open('config.json', 'r') as f:
+                json_config = json.load(f)
+                print("✓ Loaded configuration from config.json")
+                
+                # Extract custom instructions from openmemory settings
+                if "openmemory" in json_config and "custom_instructions" in json_config["openmemory"]:
+                    db_custom_instructions = json_config["openmemory"]["custom_instructions"]
+                
+                # Override defaults with configurations from config.json
+                if "mem0" in json_config:
+                    mem0_config = json_config["mem0"]
+                    
+                    # Update LLM configuration if available
+                    if "llm" in mem0_config and mem0_config["llm"] is not None:
+                        config["llm"] = mem0_config["llm"]
+                        if config["llm"].get("provider") == "ollama":
+                            config["llm"] = _fix_ollama_urls(config["llm"])
+                    
+                    # Update Embedder configuration if available
+                    if "embedder" in mem0_config and mem0_config["embedder"] is not None:
+                        config["embedder"] = mem0_config["embedder"]
+                        if config["embedder"].get("provider") == "ollama":
+                            config["embedder"] = _fix_ollama_urls(config["embedder"])
+
+                    # Update Vector Store configuration if available
+                    if "vector_store" in mem0_config and mem0_config["vector_store"] is not None:
+                        config["vector_store"] = mem0_config["vector_store"]
+                    
+                    # Load graph_store from config.json
+                    if "graph_store" in mem0_config and mem0_config["graph_store"] is not None:
+                        config["graph_store"] = mem0_config["graph_store"]
+                        print(f"✓ Loaded graph_store config: {config['graph_store']}")
+                
+                config_loaded_from = "config.json"
+        except FileNotFoundError:
+            print("config.json not found, trying database...")
+        except Exception as e:
+            print(f"Warning: Error loading config.json: {e}")
+        
+        # Load configuration from database (this will override config.json if present)
         try:
             db = SessionLocal()
             db_config = db.query(ConfigModel).filter(ConfigModel.key == "main").first()
             
             if db_config:
                 json_config = db_config.value
+                print("✓ Loading configuration from database (overriding config.json)")
                 
                 # Extract custom instructions from openmemory settings
                 if "openmemory" in json_config and "custom_instructions" in json_config["openmemory"]:
                     db_custom_instructions = json_config["openmemory"]["custom_instructions"]
                 
-                # Override defaults with configurations from the database
+                # Override with configurations from the database
                 if "mem0" in json_config:
                     mem0_config = json_config["mem0"]
                     
@@ -342,14 +527,20 @@ def get_memory_client(custom_instructions: str = None):
 
                     if "vector_store" in mem0_config and mem0_config["vector_store"] is not None:
                         config["vector_store"] = mem0_config["vector_store"]
+                    
+                    # Load graph_store from config.json/database
+                    if "graph_store" in mem0_config and mem0_config["graph_store"] is not None:
+                        config["graph_store"] = mem0_config["graph_store"]
+                        print(f"✓ Loaded graph_store config: {config['graph_store']}")
+                config_loaded_from = "database"
             else:
-                print("No configuration found in database, using defaults")
+                print(f"No configuration found in database, using {config_loaded_from}")
                     
             db.close()
                             
         except Exception as e:
             print(f"Warning: Error loading configuration from database: {e}")
-            print("Using default configuration")
+            print(f"Using configuration from {config_loaded_from}")
             # Continue with default configuration if database config can't be loaded
 
         # Use custom_instructions parameter first, then fall back to database value
@@ -361,6 +552,12 @@ def get_memory_client(custom_instructions: str = None):
         # This ensures that even default config values like "env:OPENAI_API_KEY" get parsed
         print("Parsing environment variables in final config...")
         config = _parse_environment_variables(config)
+        
+        # Ensure graph_store has proper LLM configuration for entity extraction
+        if "graph_store" in config:
+            if "llm" not in config["graph_store"] or config["graph_store"]["llm"] is None:
+                config["graph_store"]["llm"] = config["llm"]
+                print(f"✓ Added parsed LLM config to graph_store for entity extraction")
 
         # Check if config has changed by comparing hashes
         current_config_hash = _get_config_hash(config)
