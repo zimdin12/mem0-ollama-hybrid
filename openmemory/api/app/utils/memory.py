@@ -407,6 +407,7 @@ def _parse_environment_variables(config_dict):
     """
     Parse environment variables in config values.
     Converts 'env:VARIABLE_NAME' to actual environment variable values.
+    Handles type conversion for numeric fields.
     """
     if isinstance(config_dict, dict):
         parsed_config = {}
@@ -415,8 +416,17 @@ def _parse_environment_variables(config_dict):
                 env_var = value.split(":", 1)[1]
                 env_value = os.environ.get(env_var)
                 if env_value:
-                    parsed_config[key] = env_value
-                    print(f"Loaded {env_var} from environment for {key}")
+                    # Handle numeric fields that need to be integers
+                    if key in ['embedding_model_dims', 'port']:
+                        try:
+                            parsed_config[key] = int(env_value)
+                            print(f"Loaded {env_var} from environment for {key} (converted to int: {parsed_config[key]})")
+                        except ValueError:
+                            print(f"Warning: Cannot convert {env_var}={env_value} to integer, keeping as string")
+                            parsed_config[key] = env_value
+                    else:
+                        parsed_config[key] = env_value
+                        print(f"Loaded {env_var} from environment for {key}")
                 else:
                     print(f"Warning: Environment variable {env_var} not found, keeping original value")
                     parsed_config[key] = value

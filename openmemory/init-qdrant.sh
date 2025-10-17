@@ -40,16 +40,16 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:6333/collection
 if [ "$STATUS" = "200" ]; then
     echo "✓ Collection 'openmemory' already exists"
 else
-    echo "Creating 'openmemory' with 768 dimensions..."
+    echo "Creating 'openmemory' with 1024 dimensions..."
     
     RESPONSE=$(curl -s -X PUT \
         -H "Content-Type: application/json" \
-        -d '{"vectors":{"size":768,"distance":"Cosine"}}' \
+        -d '{"vectors":{"size":1024,"distance":"Cosine"}}' \
         -w "\nHTTP:%{http_code}" \
         http://localhost:6333/collections/openmemory)
     
     if echo "$RESPONSE" | grep -q "HTTP:200"; then
-        echo "✓ Created 'openmemory' with 768 dimensions"
+        echo "✓ Created 'openmemory' with 1024 dimensions"
     else
         echo "✗ Failed to create 'openmemory'"
         echo "Response: $RESPONSE"

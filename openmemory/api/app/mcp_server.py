@@ -26,6 +26,7 @@ from app.models import Memory, MemoryAccessLog, MemoryState, MemoryStatusHistory
 from app.utils.db import get_user_and_app
 from app.utils.memory import get_memory_client
 from app.utils.permissions import check_memory_access_permissions
+from app.utils.enhanced_memory import enhanced_memory_manager
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.routing import APIRouter
@@ -57,7 +58,7 @@ mcp_router = APIRouter(prefix="/mcp")
 # Initialize SSE transport
 sse = SseServerTransport("/mcp/messages/")
 
-@mcp.tool(description="Add a new memory. This method is called everytime the user informs anything about themselves, their preferences, or anything that has any relevant information which can be useful in the future conversation. This can also be called when the user asks you to remember something.")
+@mcp.tool(description="Intelligently add new memories by checking existing knowledge and only storing truly new information. Provides detailed feedback about what was added, updated, or already known.")
 async def add_memories(text: str) -> str:
     uid = user_id_var.get(None)
     client_name = client_name_var.get(None)
@@ -66,11 +67,6 @@ async def add_memories(text: str) -> str:
         return "Error: user_id not provided"
     if not client_name:
         return "Error: client_name not provided"
-
-    # Get memory client safely
-    memory_client = get_memory_client_safe()
-    if not memory_client:
-        return "Error: Memory system is currently unavailable. Please try again later."
 
     try:
         db = SessionLocal()
@@ -82,58 +78,54 @@ async def add_memories(text: str) -> str:
             if not app.is_active:
                 return f"Error: App {app.name} is currently paused on OpenMemory. Cannot create new memories."
 
-            response = memory_client.add(text,
-                                         user_id=uid,
-                                         metadata={
-                                            "source_app": "openmemory",
-                                            "mcp_client": client_name,
-                                        })
+            # Use enhanced memory manager for smart addition
+            addition_result = enhanced_memory_manager.smart_add_memory(
+                text, 
+                uid, 
+                metadata={
+                    "source_app": "openmemory",
+                    "mcp_client": client_name,
+                }
+            )
+            
+            response = {
+                "status": addition_result.status,
+                "summary": addition_result.summary,
+                "added_memories": addition_result.added_memories,
+                "related_memories": addition_result.related_memories[:3],
+                "insights": f"Processed {len(addition_result.added_memories)} new memories, "
+                           f"found {len(addition_result.related_memories)} related memories, "
+                           f"skipped {len(addition_result.skipped_facts)} duplicate facts."
+            }
 
-            # Process the response and update database
-            if isinstance(response, dict) and 'results' in response:
-                for result in response['results']:
-                    memory_id = uuid.UUID(result['id'])
+            # Process added memories and update database
+            for memory_data in addition_result.added_memories:
+                if 'id' in memory_data:
+                    memory_id = uuid.UUID(memory_data['id'])
+                    
+                    # Check if memory already exists
                     memory = db.query(Memory).filter(Memory.id == memory_id).first()
-
-                    if result['event'] == 'ADD':
-                        if not memory:
-                            memory = Memory(
-                                id=memory_id,
-                                user_id=user.id,
-                                app_id=app.id,
-                                content=result['memory'],
-                                state=MemoryState.active
-                            )
-                            db.add(memory)
-                        else:
-                            memory.state = MemoryState.active
-                            memory.content = result['memory']
-
-                        # Create history entry
+                    if not memory:
+                        memory = Memory(
+                            id=memory_id,
+                            user_id=user.id,
+                            app_id=app.id,
+                            content=memory_data.get('memory', text),
+                            state=MemoryState.active
+                        )
+                        db.add(memory)
+                        
+                        # Create history entry (for new memories, old_state should be the same as new_state initially)
                         history = MemoryStatusHistory(
                             memory_id=memory_id,
                             changed_by=user.id,
-                            old_state=MemoryState.deleted if memory else None,
+                            old_state=MemoryState.active,  # For new memories, treat as if it was always active
                             new_state=MemoryState.active
                         )
                         db.add(history)
 
-                    elif result['event'] == 'DELETE':
-                        if memory:
-                            memory.state = MemoryState.deleted
-                            memory.deleted_at = datetime.datetime.now(datetime.UTC)
-                            # Create history entry
-                            history = MemoryStatusHistory(
-                                memory_id=memory_id,
-                                changed_by=user.id,
-                                old_state=MemoryState.active,
-                                new_state=MemoryState.deleted
-                            )
-                            db.add(history)
-
-                db.commit()
-
-            return json.dumps(response)
+            db.commit()
+            return json.dumps(response, indent=2)
         finally:
             db.close()
     except Exception as e:
@@ -141,7 +133,7 @@ async def add_memories(text: str) -> str:
         return f"Error adding to memory: {e}"
 
 
-@mcp.tool(description="Search through stored memories. This method is called EVERYTIME the user asks anything.")
+@mcp.tool(description="Perform hybrid search across all memory systems (vector, graph, temporal) to find relevant information. Returns comprehensive results with relationships and context.")
 async def search_memory(query: str) -> str:
     uid = user_id_var.get(None)
     client_name = client_name_var.get(None)
@@ -150,68 +142,68 @@ async def search_memory(query: str) -> str:
     if not client_name:
         return "Error: client_name not provided"
 
-    # Get memory client safely
-    memory_client = get_memory_client_safe()
-    if not memory_client:
-        return "Error: Memory system is currently unavailable. Please try again later."
-
     try:
         db = SessionLocal()
         try:
             # Get or create user and app
             user, app = get_user_and_app(db, user_id=uid, app_id=client_name)
 
-            # Get accessible memory IDs based on ACL
+            # Perform hybrid search using enhanced memory manager
+            search_results = enhanced_memory_manager.hybrid_search(query, uid, limit=15)
+            
+            # Filter results based on permissions
             user_memories = db.query(Memory).filter(Memory.user_id == user.id).all()
-            accessible_memory_ids = [memory.id for memory in user_memories if check_memory_access_permissions(db, memory, app.id)]
+            accessible_memory_ids = {str(memory.id) for memory in user_memories if check_memory_access_permissions(db, memory, app.id)}
 
-            filters = {
-                "user_id": uid
-            }
+            filtered_results = []
+            for result in search_results:
+                if result.id in accessible_memory_ids or not result.id:  # Allow results without IDs (from graph/temporal)
+                    filtered_results.append({
+                        "id": result.id,
+                        "memory": result.content,
+                        "score": result.score,
+                        "source": result.source,
+                        "metadata": result.metadata,
+                        "relationships": result.relationships,
+                        "created_at": result.created_at.isoformat() if result.created_at and hasattr(result.created_at, 'isoformat') else str(result.created_at) if result.created_at else None,
+                        "updated_at": result.updated_at.isoformat() if result.updated_at and hasattr(result.updated_at, 'isoformat') else str(result.updated_at) if result.updated_at else None,
+                    })
 
-            embeddings = memory_client.embedding_model.embed(query, "search")
-
-            hits = memory_client.vector_store.search(
-                query=query, 
-                vectors=embeddings, 
-                limit=10, 
-                filters=filters,
-            )
-
-            allowed = set(str(mid) for mid in accessible_memory_ids) if accessible_memory_ids else None
-
-            results = []
-            for h in hits:
-                # All vector db search functions return OutputData class
-                id, score, payload = h.id, h.score, h.payload
-                if allowed and h.id is None or h.id not in allowed: 
-                    continue
-                
-                results.append({
-                    "id": id, 
-                    "memory": payload.get("data"), 
-                    "hash": payload.get("hash"),
-                    "created_at": payload.get("created_at"), 
-                    "updated_at": payload.get("updated_at"), 
-                    "score": score,
-                })
-
-            for r in results: 
-                if r.get("id"): 
-                    access_log = MemoryAccessLog(
-                        memory_id=uuid.UUID(r["id"]),
-                        app_id=app.id,
-                        access_type="search",
-                        metadata_={
-                            "query": query,
-                            "score": r.get("score"),
-                            "hash": r.get("hash"),
-                        },
-                    )
-                    db.add(access_log)
+            # Log access for memories with IDs
+            for result in filtered_results:
+                if result.get("id"):
+                    try:
+                        access_log = MemoryAccessLog(
+                            memory_id=uuid.UUID(result["id"]),
+                            app_id=app.id,
+                            access_type="hybrid_search",
+                            metadata_={
+                                "query": query,
+                                "score": result.get("score"),
+                                "source": result.get("source"),
+                            },
+                        )
+                        db.add(access_log)
+                    except ValueError:
+                        # Skip invalid UUIDs
+                        pass
+            
             db.commit()
 
-            return json.dumps({"results": results}, indent=2)
+            # Prepare comprehensive response
+            response = {
+                "query": query,
+                "total_results": len(filtered_results),
+                "results": filtered_results,
+                "search_strategy": "hybrid (vector + graph + temporal)",
+                "sources_found": list(set(r["source"] for r in filtered_results)),
+                "insights": [
+                    f"Found {len(filtered_results)} relevant memories",
+                    f"Search covered {len(set(r['source'] for r in filtered_results))} different memory dimensions"
+                ]
+            }
+
+            return json.dumps(response, indent=2)
         finally:
             db.close()
     except Exception as e:
@@ -351,6 +343,153 @@ async def delete_all_memories() -> str:
     except Exception as e:
         logging.exception(f"Error deleting memories: {e}")
         return f"Error deleting memories: {e}"
+
+
+@mcp.tool(description="Comprehensive memory processing like human memory - automatically extract, store, relate, and provide context from conversation turns. Pass both user message and LLM response for intelligent memory management.")
+async def handle_conversation(user_message: str, llm_response: str) -> str:
+    """
+    Comprehensive memory handling that processes both user and LLM messages
+    like human memory - extracting, storing, relating, and providing context
+    """
+    uid = user_id_var.get(None)
+    client_name = client_name_var.get(None)
+    
+    if not uid:
+        return "Error: user_id not provided"
+    if not client_name:
+        return "Error: client_name not provided"
+
+    try:
+        db = SessionLocal()
+        try:
+            # Get or create user and app
+            user, app = get_user_and_app(db, user_id=uid, app_id=client_name)
+
+            # Check if app is active
+            if not app.is_active:
+                return f"Error: App {app.name} is currently paused on OpenMemory."
+
+            # Use enhanced memory manager for comprehensive processing
+            result = enhanced_memory_manager.comprehensive_memory_handle(
+                user_message, 
+                llm_response, 
+                uid
+            )
+            
+            # Process any new memories that were added
+            for memory_update in result.get("memory_updates", []):
+                addition_result = memory_update.get("result", {})
+                for memory_data in addition_result.get("added_memories", []):
+                    if 'id' in memory_data:
+                        memory_id = uuid.UUID(memory_data['id'])
+                        
+                        # Check if memory already exists
+                        memory = db.query(Memory).filter(Memory.id == memory_id).first()
+                        if not memory:
+                            memory = Memory(
+                                id=memory_id,
+                                user_id=user.id,
+                                app_id=app.id,
+                                content=memory_data.get('memory', memory_update.get('content', '')),
+                                state=MemoryState.active
+                            )
+                            db.add(memory)
+                            
+                            # Create history entry (for new memories, old_state should be the same as new_state initially)
+                            history = MemoryStatusHistory(
+                                memory_id=memory_id,
+                                changed_by=user.id,
+                                old_state=MemoryState.active,  # For new memories, treat as if it was always active
+                                new_state=MemoryState.active
+                            )
+                            db.add(history)
+
+            db.commit()
+            
+            # Prepare comprehensive response
+            response = {
+                "processing_status": result.get("status", "processed"),
+                "memory_operations": {
+                    "extracted_content": len(result.get("memory_updates", [])),
+                    "related_memories_found": len(result.get("related_context", [])),
+                    "patterns_identified": result.get("patterns", []),
+                    "insights_generated": result.get("insights", [])
+                },
+                "contextual_information": {
+                    "relevant_memories": result.get("related_context", [])[:5],  # Limit for readability
+                    "conversation_patterns": result.get("patterns", []),
+                    "memory_insights": result.get("insights", [])
+                },
+                "memory_updates": result.get("memory_updates", []),
+                "summary": f"Processed conversation turn: extracted {len(result.get('memory_updates', []))} memory items, "
+                          f"found {len(result.get('related_context', []))} related memories, "
+                          f"identified {len(result.get('patterns', []))} conversation patterns."
+            }
+            
+            return json.dumps(response, indent=2)
+            
+        finally:
+            db.close()
+    except Exception as e:
+        logging.exception(f"Error in comprehensive memory handling: {e}")
+        return f"Error processing conversation: {e}"
+
+
+@mcp.tool(description="Get memories related to specific entities or topics, with relationship traversal and contextual connections.")
+async def get_related_memories(topic: str, max_depth: int = 2) -> str:
+    """
+    Find memories related to a specific topic with relationship traversal
+    """
+    uid = user_id_var.get(None)
+    client_name = client_name_var.get(None)
+    
+    if not uid:
+        return "Error: user_id not provided"
+    if not client_name:
+        return "Error: client_name not provided"
+
+    try:
+        # Perform enhanced search for the topic
+        search_results = enhanced_memory_manager.hybrid_search(topic, uid, limit=20)
+        
+        # Group results by source and relationships
+        related_memories = {
+            "direct_matches": [],
+            "relationship_connections": [],
+            "temporal_context": [],
+            "topic_summary": topic
+        }
+        
+        for result in search_results:
+            memory_data = {
+                "id": result.id,
+                "content": result.content,
+                "score": result.score,
+                "metadata": result.metadata,
+                "relationships": result.relationships
+            }
+            
+            if result.source == "vector":
+                related_memories["direct_matches"].append(memory_data)
+            elif result.source == "graph":
+                related_memories["relationship_connections"].append(memory_data)
+            elif result.source == "temporal":
+                related_memories["temporal_context"].append(memory_data)
+        
+        # Add insights about the topic
+        total_memories = len(search_results)
+        related_memories["insights"] = [
+            f"Found {total_memories} memories related to '{topic}'",
+            f"Direct semantic matches: {len(related_memories['direct_matches'])}",
+            f"Relationship connections: {len(related_memories['relationship_connections'])}",
+            f"Temporal context: {len(related_memories['temporal_context'])}"
+        ]
+        
+        return json.dumps(related_memories, indent=2)
+        
+    except Exception as e:
+        logging.exception(f"Error getting related memories: {e}")
+        return f"Error getting related memories: {e}"
 
 
 @mcp_router.get("/{client_name}/sse/{user_id}")
