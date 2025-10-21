@@ -461,57 +461,95 @@ async def create_memory(
                             
                             memory_id = uuid4()
                             
-                            # Store in database
-                            memory = Memory(
-                                id=memory_id,
-                                user_id=user.id,
-                                app_id=app_obj.id,
-                                content=chunk,
-                                metadata_={
-                                    **request.metadata,
-                                    "chunk_index": i,
-                                    "total_chunks": len(text_chunks),
-                                    "is_chunked_document": True,
-                                    "storage_method": "direct_vector_no_results"
-                                },
-                                state=MemoryState.active
-                            )
-                            db.add(memory)
-                            created_memories.append(memory)
+                            # Store in database only if not already processed
+                            if str(memory_id) not in processed_memory_ids:
+                                memory = Memory(
+                                    id=memory_id,
+                                    user_id=user.id,
+                                    app_id=app_obj.id,
+                                    content=chunk,
+                                    metadata_={
+                                        **request.metadata,
+                                        "chunk_index": i,
+                                        "total_chunks": len(text_chunks),
+                                        "is_chunked_document": True,
+                                        "storage_method": "direct_vector_no_results"
+                                    },
+                                    state=MemoryState.active
+                                )
+                                db.add(memory)
+                                created_memories.append(memory)
+                                processed_memory_ids.add(str(memory_id))
+                                
+                                # Create history entry
+                                history = MemoryStatusHistory(
+                                    memory_id=memory_id,
+                                    changed_by=user.id,
+                                    old_state=MemoryState.active,
+                                    new_state=MemoryState.active
+                                )
+                                db.add(history)
                             
-                            # Create history entry
-                            history = MemoryStatusHistory(
-                                memory_id=memory_id,
-                                changed_by=user.id,
-                                old_state=MemoryState.active,
-                                new_state=MemoryState.active
-                            )
-                            db.add(history)
-                            
-                            # Store directly in Qdrant for semantic search
+                            # Store directly in Qdrant for semantic search - use improved method
+                            qdrant_stored = False
                             try:
                                 if hasattr(memory_client, 'vector_store') and memory_client.vector_store and hasattr(memory_client, 'embedder'):
                                     # Get embedding for the chunk
                                     embedding = memory_client.embedder.embed_query(chunk)
+                                    logging.info(f"Created embedding for chunk {i+1}: {len(embedding)} dimensions")
                                     
-                                    # Use correct Qdrant insert API: vectors, payloads, ids
-                                    memory_client.vector_store.insert(
-                                        vectors=[embedding],
-                                        payloads=[{
-                                            "user_id": request.user_id,
-                                            "chunk_index": i,
-                                            "total_chunks": len(text_chunks),
-                                            "storage_method": "direct_no_results",
-                                            "memory_id": str(memory_id),
-                                            "text": chunk  # Store the actual text in payload
-                                        }],
-                                        ids=[f"{memory_id}_chunk_{i}"]
-                                    )
-                                    
-                                    logging.info(f"✅ Stored chunk {i+1} directly in Qdrant (no results fallback)")
-                                    
+                                    # Try using the client's upsert method directly
+                                    if hasattr(memory_client.vector_store, 'client') and hasattr(memory_client.vector_store.client, 'upsert'):
+                                        from qdrant_client.models import PointStruct
+                                        
+                                        points = [PointStruct(
+                                            id=f"{memory_id}_chunk_{i}",
+                                            vector=embedding,
+                                            payload={
+                                                "user_id": request.user_id,
+                                                "chunk_index": i,
+                                                "total_chunks": len(text_chunks),
+                                                "storage_method": "direct_no_results",
+                                                "memory_id": str(memory_id),
+                                                "text": chunk
+                                            }
+                                        )]
+                                        
+                                        # Get collection name from vector store
+                                        collection_name = getattr(memory_client.vector_store, 'collection_name', 'mem0')
+                                        
+                                        result = memory_client.vector_store.client.upsert(
+                                            collection_name=collection_name,
+                                            points=points
+                                        )
+                                        
+                                        logging.info(f"✅ Stored chunk {i+1} in Qdrant using client.upsert: {result}")
+                                        qdrant_stored = True
+                                        
+                                    elif hasattr(memory_client.vector_store, 'insert'):
+                                        # Fallback to insert method
+                                        memory_client.vector_store.insert(
+                                            vectors=[embedding],
+                                            payloads=[{
+                                                "user_id": request.user_id,
+                                                "chunk_index": i,
+                                                "total_chunks": len(text_chunks),
+                                                "storage_method": "direct_no_results",
+                                                "memory_id": str(memory_id),
+                                                "text": chunk
+                                            }],
+                                            ids=[f"{memory_id}_chunk_{i}"]
+                                        )
+                                        logging.info(f"✅ Stored chunk {i+1} in Qdrant using insert method")
+                                        qdrant_stored = True
+                                        
                             except Exception as vector_error:
-                                logging.warning(f"Could not store chunk {i+1} in vector store: {vector_error}")
+                                logging.error(f"❌ Failed to store chunk {i+1} in Qdrant: {vector_error}")
+                                import traceback
+                                logging.error(f"Qdrant storage traceback: {traceback.format_exc()}")
+                            
+                            if not qdrant_stored:
+                                logging.warning(f"⚠️ Chunk {i+1} stored in SQLite but NOT in Qdrant - semantic search will not find this chunk")
                         
                         logging.info(f"Processed chunk {i+1}/{len(text_chunks)}: {len(chunk_result.get('results', []))} memories")
                         
@@ -553,15 +591,44 @@ async def create_memory(
                         db.add(history)
                         
                         # ALSO store directly in Qdrant for semantic search
+                        qdrant_stored = False
                         try:
                             # Access the vector store directly to store this chunk
-                            if hasattr(memory_client, 'vector_store') and memory_client.vector_store:
-                                # Create embedding for the chunk
-                                if hasattr(memory_client, 'embedder') and memory_client.embedder:
-                                    # Get embedding for the chunk
-                                    embedding = memory_client.embedder.embed_query(chunk)
+                            if hasattr(memory_client, 'vector_store') and memory_client.vector_store and hasattr(memory_client, 'embedder'):
+                                # Get embedding for the chunk
+                                embedding = memory_client.embedder.embed_query(chunk)
+                                logging.info(f"Created embedding for chunk {i} exception fallback: {len(embedding)} dimensions")
+                                
+                                # Try using the client's upsert method directly first
+                                if hasattr(memory_client.vector_store, 'client') and hasattr(memory_client.vector_store.client, 'upsert'):
+                                    from qdrant_client.models import PointStruct
                                     
-                                    # Store directly in Qdrant using correct API
+                                    points = [PointStruct(
+                                        id=f"{memory_id}_chunk_{i}",
+                                        vector=embedding,
+                                        payload={
+                                            "user_id": request.user_id,
+                                            "chunk_index": i,
+                                            "total_chunks": len(text_chunks),
+                                            "storage_method": "direct_fallback",
+                                            "memory_id": str(memory_id),
+                                            "text": chunk
+                                        }
+                                    )]
+                                    
+                                    # Get collection name from vector store
+                                    collection_name = getattr(memory_client.vector_store, 'collection_name', 'mem0')
+                                    
+                                    result = memory_client.vector_store.client.upsert(
+                                        collection_name=collection_name,
+                                        points=points
+                                    )
+                                    
+                                    logging.info(f"✅ Stored chunk {i} in Qdrant using client.upsert (exception fallback): {result}")
+                                    qdrant_stored = True
+                                    
+                                elif hasattr(memory_client.vector_store, 'insert'):
+                                    # Fallback to insert method
                                     memory_client.vector_store.insert(
                                         vectors=[embedding],
                                         payloads=[{
@@ -570,15 +637,20 @@ async def create_memory(
                                             "total_chunks": len(text_chunks),
                                             "storage_method": "direct_fallback",
                                             "memory_id": str(memory_id),
-                                            "text": chunk  # Store the actual text in payload
+                                            "text": chunk
                                         }],
                                         ids=[f"{memory_id}_chunk_{i}"]
                                     )
-                                    
-                                    logging.info(f"✅ Stored chunk {i} directly in Qdrant for semantic search")
+                                    logging.info(f"✅ Stored chunk {i} in Qdrant using insert method (exception fallback)")
+                                    qdrant_stored = True
                                     
                         except Exception as vector_error:
-                            logging.warning(f"Could not store chunk {i} in vector store: {vector_error}")
+                            logging.error(f"❌ Failed to store chunk {i} in Qdrant (exception fallback): {vector_error}")
+                            import traceback
+                            logging.error(f"Qdrant storage traceback: {traceback.format_exc()}")
+                        
+                        if not qdrant_stored:
+                            logging.warning(f"⚠️ Chunk {i} stored in SQLite but NOT in Qdrant - semantic search will not find this chunk")
                 
                 db.commit()
                 
