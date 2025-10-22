@@ -67,14 +67,67 @@ def _apply_essential_ollama_fix():
                 return tool_calls
             
             try:
+                # Format 0: Function call syntax - extract_entities([...]) or establish_relationships([...])
+                # qwen3:4b sometimes returns the function call as text instead of proper tool_calls
+                func_call_match = re.search(r'(extract_entities|establish_relationships)\s*\(\s*(\[.*?\])\s*\)', content, re.DOTALL)
+                if func_call_match:
+                    func_name = func_call_match.group(1)
+                    json_str = func_call_match.group(2)
+
+                    try:
+                        parsed_data = json.loads(json_str)
+
+                        if func_name == 'extract_entities' and isinstance(parsed_data, list):
+                            tool_calls.append({
+                                'name': 'extract_entities',
+                                'arguments': {'entities': parsed_data}
+                            })
+                            return tool_calls
+                        elif func_name == 'establish_relationships' and isinstance(parsed_data, list):
+                            tool_calls.append({
+                                'name': 'establish_relationships',
+                                'arguments': {'entities': parsed_data}
+                            })
+                            return tool_calls
+                    except json.JSONDecodeError:
+                        print(f"⚠️  Failed to parse JSON from function call: {json_str[:200]}")
+
+                # Format 0b: Bare JSON array - qwen3:4b sometimes returns just [{"source": ..., "relationship": ..., "destination": ...}]
+                # Check which tool is being used to know what type of array this is
+                if content.strip().startswith('['):
+                    try:
+                        parsed_array = json.loads(content.strip())
+                        if isinstance(parsed_array, list) and len(parsed_array) > 0:
+                            first_item = parsed_array[0]
+                            # Check if it's a relationship array (has source, relationship, destination)
+                            if isinstance(first_item, dict) and 'source' in first_item and 'relationship' in first_item:
+                                for tool in tools:
+                                    if tool.get('function', {}).get('name') == 'establish_relationships':
+                                        tool_calls.append({
+                                            'name': 'establish_relationships',
+                                            'arguments': {'entities': parsed_array}
+                                        })
+                                        return tool_calls
+                            # Check if it's an entity array (has entity, entity_type)
+                            elif isinstance(first_item, dict) and 'entity' in first_item:
+                                for tool in tools:
+                                    if tool.get('function', {}).get('name') == 'extract_entities':
+                                        tool_calls.append({
+                                            'name': 'extract_entities',
+                                            'arguments': {'entities': parsed_array}
+                                        })
+                                        return tool_calls
+                    except json.JSONDecodeError:
+                        pass  # Not valid JSON, continue to other parsing methods
+
                 # Try to parse as JSON first
                 if content.strip().startswith('{'):
                     parsed = json.loads(content)
-                    
+
                     # Look for entities in the parsed JSON
                     if 'entities' in parsed:
                         entities = parsed['entities']
-                        
+
                         # Convert to proper format for extract_entities tool
                         for tool in tools:
                             if tool.get('function', {}).get('name') == 'extract_entities':
@@ -108,30 +161,118 @@ def _apply_essential_ollama_fix():
                                             ]
                                         }
                                     })
+                                    break
                 else:
                     # Try to extract entities from text format
-                    lines = content.split('\n')
+                    # qwen3:4b uses multiple formats - handle all of them
                     entities = []
-                    
-                    for line in lines:
-                        # Look for patterns like "- Sarah Johnson: Person"
-                        match = re.match(r'-\s*([^:]+):\s*(.+)', line.strip())
-                        if match:
-                            entity = match.group(1).strip()
-                            entity_type = match.group(2).strip()
-                            entities.append({
-                                'entity': entity,
-                                'entity_type': entity_type
+
+                    # Format 1: Multi-line structured format
+                    # Entity: steven
+                    # Type: developer
+                    # Source: ...
+                    #
+                    # Entity: ...
+                    entity_blocks = re.split(r'\n\s*\n', content)
+                    for block in entity_blocks:
+                        entity_match = re.search(r'Entity:\s*(.+)', block, re.IGNORECASE)
+                        type_match = re.search(r'Type:\s*(.+)', block, re.IGNORECASE)
+
+                        if entity_match and type_match:
+                            entity = entity_match.group(1).strip()
+                            entity_type = type_match.group(1).strip()
+                            if entity and entity_type:
+                                entities.append({'entity': entity, 'entity_type': entity_type})
+
+                    # Format 2: Bullet list format
+                    # - entity_name: entity_type
+                    # - entity_name (type: actual_type)
+                    # - entity_name (description)
+                    # - entity_name (plain, no type)
+                    if not entities:
+                        lines = content.split('\n')
+                        for line in lines:
+                            # Pattern 1: "- entity_name (type: actual_type)"
+                            match = re.match(r'-\s*([^(]+)\s*\(type:\s*([^)]+)\)', line.strip(), re.IGNORECASE)
+                            if match:
+                                entity = match.group(1).strip()
+                                entity_type = match.group(2).strip()
+                            else:
+                                # Pattern 2: "- entity_name: entity_type"
+                                match = re.match(r'-\s*([^(:]+):\s*([^(]+)(?:\(|$)', line.strip())
+                                if match:
+                                    entity = match.group(1).strip()
+                                    entity_type = match.group(2).strip()
+                                else:
+                                    # Pattern 3: "- entity_name (description)"
+                                    match = re.match(r'-\s*([^(]+)\s*\(([^)]+)\)', line.strip())
+                                    if match:
+                                        entity = match.group(1).strip()
+                                        entity_type = match.group(2).strip()
+                                        # Clean entity_type to get just the first meaningful word/phrase
+                                        if 'self-reference' in entity_type.lower() or 'self-referential' in entity_type.lower() or 'source entity' in entity_type.lower():
+                                            entity_type = 'person'
+                                        elif 'entity type' in entity_type.lower() and ':' in entity_type:
+                                            # "entity type: game" -> "game"
+                                            entity_type = entity_type.split(':', 1)[1].strip()
+                                        elif ':' in entity_type:
+                                            # Check if it's "type: X" format and extract X
+                                            if entity_type.lower().startswith('type'):
+                                                entity_type = entity_type.split(':', 1)[1].strip()
+                                            else:
+                                                entity_type = entity_type.split(':')[0].strip()
+                                        elif ',' in entity_type:
+                                            entity_type = entity_type.split(',')[0].strip()
+                                    else:
+                                        # Pattern 4: "- entity_name" (plain bullet, no type info)
+                                        match = re.match(r'-\s*([^\n]+)', line.strip())
+                                        if match:
+                                            entity = match.group(1).strip()
+                                            # Default to generic entity type
+                                            entity_type = 'entity'
+                                        else:
+                                            continue
+
+                            if entity and entity_type:
+                                entities.append({'entity': entity, 'entity_type': entity_type})
+
+                    # Check which tool is being requested
+                    for tool in tools:
+                        if tool.get('function', {}).get('name') == 'extract_entities' and entities:
+                            tool_calls.append({
+                                'name': 'extract_entities',
+                                'arguments': {'entities': entities}
                             })
-                    
-                    if entities:
-                        for tool in tools:
-                            if tool.get('function', {}).get('name') == 'extract_entities':
+                            break
+                        elif tool.get('function', {}).get('name') == 'establish_relationships':
+                            # Parse relationships from text format
+                            # Format: "source -- relationship --> destination"
+                            # Or: "source -- relationship -- destination"
+                            relationships = []
+                            for line in content.split('\n'):
+                                # Pattern: source -- relationship --> destination
+                                match = re.search(r'`?([^`-]+)\s*--+\s*([^-]+?)\s*--+>\s*([^`\n]+)`?', line)
+                                if not match:
+                                    # Pattern: source -- relationship -- destination
+                                    match = re.search(r'`?([^`-]+)\s*--+\s*([^-]+?)\s*--+\s*([^`\n]+)`?', line)
+
+                                if match:
+                                    source = match.group(1).strip()
+                                    relationship = match.group(2).strip()
+                                    destination = match.group(3).strip()
+                                    if source and relationship and destination:
+                                        relationships.append({
+                                            'source': source,
+                                            'relationship': relationship,
+                                            'destination': destination
+                                        })
+
+                            if relationships:
                                 tool_calls.append({
-                                    'name': 'extract_entities',
-                                    'arguments': {'entities': entities}
+                                    'name': 'establish_relationships',
+                                    'arguments': {'entities': relationships}
                                 })
-                                break
+                            break
                                 
             except Exception as e:
                 print(f"⚠️  Tool call parsing error: {e}")
@@ -148,11 +289,37 @@ def _apply_essential_ollama_fix():
             if tools is not None:
                 # Entity extraction pipeline - need to create proper tool_calls format
                 if isinstance(result, dict):
+                    # Check if tool_calls are missing or look incomplete
+                    needs_parsing = False
                     if 'tool_calls' not in result or not result['tool_calls']:
-                        # Parse the content and create tool_calls format
+                        needs_parsing = True
+                        print(f"🔍 No tool_calls in result, will parse content")
+                    else:
+                        # Check if tool_calls look suspiciously incomplete
+                        # qwen3:4b sometimes creates minimal tool_calls but puts full data in content
+                        for tc in result.get('tool_calls', []):
+                            if tc.get('name') == 'extract_entities':
+                                entities = tc.get('arguments', {}).get('entities', [])
+                                content_len = len(result.get('content', ''))
+                                print(f"🔍 Entity extraction: {len(entities)} entities for {content_len} char content")
+                                # If we have a long content (>500 chars) but very few entities (<3), parse content
+                                if content_len > 500 and len(entities) < 3:
+                                    needs_parsing = True
+                                    print(f"⚠️  qwen3:4b provided incomplete tool_calls ({len(entities)} entities for {content_len} chars). Parsing content...")
+
+                    if needs_parsing:
+                        # Parse the content and create/supplement tool_calls format
                         content = result.get('content', '')
                         if content:
+                            print(f"🔍 Parsing content ({len(content)} chars):")
+                            print(f"   First 300 chars: {content[:300]}")
                             tool_calls = _parse_content_to_tool_calls(content, tools)
+                            print(f"🔍 Parsed {len(tool_calls)} tool_calls")
+                            if tool_calls:
+                                for tc in tool_calls:
+                                    if tc.get('name') == 'extract_entities':
+                                        ents = tc.get('arguments', {}).get('entities', [])
+                                        print(f"   - extract_entities: {len(ents)} entities")
                             result['tool_calls'] = tool_calls
                     return result
                 else:
@@ -562,16 +729,55 @@ def get_memory_client(custom_instructions: str = None):
         # This ensures that even default config values like "env:OPENAI_API_KEY" get parsed
         print("Parsing environment variables in final config...")
         config = _parse_environment_variables(config)
-        
+
+        # Load custom prompts for qwen3:4b optimization
+        try:
+            from custom_update_prompt import (
+                get_qwen3_fact_extraction_prompt,
+                get_qwen3_update_prompt,
+                get_qwen3_graph_relationship_prompt
+            )
+
+            # Apply custom fact extraction prompt if not already set
+            if "custom_fact_extraction_prompt" not in config or config.get("custom_fact_extraction_prompt") is None:
+                config["custom_fact_extraction_prompt"] = get_qwen3_fact_extraction_prompt()
+                print("✓ Loaded custom fact extraction prompt optimized for qwen3:4b")
+
+            # Apply custom update memory prompt if not already set
+            if "custom_update_memory_prompt" not in config or config.get("custom_update_memory_prompt") is None:
+                config["custom_update_memory_prompt"] = get_qwen3_update_prompt()
+                print("✓ Loaded custom update memory prompt optimized for qwen3:4b")
+
+            # TEMPORARY: Disable custom graph prompt to test
+            # The custom_prompt changes how mem0 sends the entity list to the LLM
+            # When custom_prompt is set, it doesn't include "List of entities: ..." in user message
+            # This breaks qwen3:4b's relationship extraction
+            # TODO: Fix this by modifying the prompt or the code
+            # if "graph_store" in config:
+            #     if "custom_prompt" not in config["graph_store"] or config["graph_store"].get("custom_prompt") is None:
+            #         config["graph_store"]["custom_prompt"] = get_qwen3_graph_relationship_prompt()
+            #         print("✓ Loaded custom graph relationship prompt optimized for qwen3:4b")
+
+        except ImportError as e:
+            print(f"Warning: Could not load custom prompts: {e}")
+            print("Using default mem0 prompts")
+
         # Ensure graph_store has proper LLM configuration for entity extraction
         if "graph_store" in config:
             if "llm" not in config["graph_store"] or config["graph_store"]["llm"] is None:
                 config["graph_store"]["llm"] = config["llm"]
                 print(f"✓ Added parsed LLM config to graph_store for entity extraction")
 
+        # Apply qwen3:4b entity parsing fix for graph extraction
+        try:
+            from fix_graph_entity_parsing import apply_patch
+            apply_patch()
+        except ImportError as e:
+            print(f"Warning: Could not load graph entity parsing fix: {e}")
+
         # Check if config has changed by comparing hashes
         current_config_hash = _get_config_hash(config)
-        
+
         # Only reinitialize if config changed or client doesn't exist
         if _memory_client is None or _config_hash != current_config_hash:
             print(f"Initializing memory client with config hash: {current_config_hash}")
@@ -585,7 +791,7 @@ def get_memory_client(custom_instructions: str = None):
                 _memory_client = None
                 _config_hash = None
                 return None
-        
+
         return _memory_client
         
     except Exception as e:

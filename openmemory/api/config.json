@@ -34,6 +34,8 @@
                 "embedding_model_dims": "env:QDRANT_EMBEDDING_DIMS"
             }
         },
-        "version": "v1.1"
+        "version": "v1.1",
+        "custom_fact_extraction_prompt": "env:CUSTOM_FACT_EXTRACTION_PROMPT",
+        "custom_update_memory_prompt": "env:CUSTOM_UPDATE_MEMORY_PROMPT"
     }
 }
