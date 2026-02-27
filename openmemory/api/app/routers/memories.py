@@ -330,7 +330,8 @@ async def create_memory(
             metadata={
                 "source_app": "openmemory",
                 "mcp_client": request.app,
-            }
+            },
+            infer=request.infer
         )
         
         logging.info(f"Memory add response: {qdrant_response}")
