@@ -1,3 +1,5 @@
+import json
+import os
 from typing import Any, Dict, Optional
 
 from app.database import get_db
@@ -47,74 +49,78 @@ class ConfigSchema(BaseModel):
     mem0: Optional[Mem0Config] = None
 
 def get_default_configuration():
-    """Get the default configuration with sensible defaults for LLM and embedder."""
-    return {
-        "openmemory": {
-            "custom_instructions": None
-        },
-        "mem0": {
-            "llm": {
-                "provider": "openai",
-                "config": {
-                    "model": "gpt-4o-mini",
-                    "temperature": 0.1,
-                    "max_tokens": 2000,
-                    "api_key": "env:OPENAI_API_KEY"
-                }
-            },
-            "embedder": {
-                "provider": "openai",
-                "config": {
-                    "model": "text-embedding-3-small",
-                    "api_key": "env:OPENAI_API_KEY"
-                }
-            },
-            "vector_store": None
-        }
+    """Build defaults from config.json and environment variables."""
+    config = {
+        "openmemory": {"custom_instructions": None},
+        "mem0": {"llm": None, "embedder": None, "vector_store": None}
     }
 
+    # Try loading from config.json first
+    try:
+        with open('config.json', 'r') as f:
+            json_config = json.load(f)
+        if "mem0" in json_config:
+            if "llm" in json_config["mem0"]:
+                config["mem0"]["llm"] = json_config["mem0"]["llm"]
+            if "embedder" in json_config["mem0"]:
+                config["mem0"]["embedder"] = json_config["mem0"]["embedder"]
+            if "vector_store" in json_config["mem0"]:
+                config["mem0"]["vector_store"] = json_config["mem0"]["vector_store"]
+        if "openmemory" in json_config:
+            config["openmemory"] = json_config["openmemory"]
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    # Fall back to env vars if config.json didn't provide LLM values
+    if not config["mem0"]["llm"]:
+        provider = os.environ.get("LLM_PROVIDER", "openai")
+        model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+        llm_config = {"model": model, "temperature": 0, "max_tokens": 4000}
+        if provider == "ollama":
+            llm_config["ollama_base_url"] = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        else:
+            llm_config["api_key"] = f"env:{provider.upper()}_API_KEY"
+        config["mem0"]["llm"] = {"provider": provider, "config": llm_config}
+
+    # Fall back to env vars if config.json didn't provide embedder values
+    if not config["mem0"]["embedder"]:
+        provider = os.environ.get("EMBEDDER_PROVIDER", "openai")
+        model = os.environ.get("EMBEDDER_MODEL", "text-embedding-3-small")
+        embedder_config = {"model": model}
+        if provider == "ollama":
+            embedder_config["ollama_base_url"] = os.environ.get("EMBEDDER_OLLAMA_BASE_URL", os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"))
+        else:
+            embedder_config["api_key"] = f"env:{provider.upper()}_API_KEY"
+        config["mem0"]["embedder"] = {"provider": provider, "config": embedder_config}
+
+    return config
+
 def get_config_from_db(db: Session, key: str = "main"):
-    """Get configuration from database."""
+    """Get configuration from database, falling back to defaults without persisting."""
     config = db.query(ConfigModel).filter(ConfigModel.key == key).first()
-    
+
     if not config:
-        # Create default config with proper provider configurations
-        default_config = get_default_configuration()
-        db_config = ConfigModel(key=key, value=default_config)
-        db.add(db_config)
-        db.commit()
-        db.refresh(db_config)
-        return default_config
-    
+        # Return defaults without creating a DB row — prevents OpenAI override problem
+        return get_default_configuration()
+
     # Ensure the config has all required sections with defaults
     config_value = config.value
     default_config = get_default_configuration()
-    
+
     # Merge with defaults to ensure all required fields exist
     if "openmemory" not in config_value:
         config_value["openmemory"] = default_config["openmemory"]
-    
+
     if "mem0" not in config_value:
         config_value["mem0"] = default_config["mem0"]
     else:
-        # Ensure LLM config exists with defaults
         if "llm" not in config_value["mem0"] or config_value["mem0"]["llm"] is None:
             config_value["mem0"]["llm"] = default_config["mem0"]["llm"]
-        
-        # Ensure embedder config exists with defaults
         if "embedder" not in config_value["mem0"] or config_value["mem0"]["embedder"] is None:
             config_value["mem0"]["embedder"] = default_config["mem0"]["embedder"]
-        
-        # Ensure vector_store config exists with defaults
         if "vector_store" not in config_value["mem0"]:
             config_value["mem0"]["vector_store"] = default_config["mem0"]["vector_store"]
 
-    # Save the updated config back to database if it was modified
-    if config_value != config.value:
-        config.value = config_value
-        db.commit()
-        db.refresh(config)
-    
     return config_value
 
 def save_config_to_db(db: Session, config: Dict[str, Any], key: str = "main"):

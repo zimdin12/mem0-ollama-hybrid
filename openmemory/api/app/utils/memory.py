@@ -669,56 +669,28 @@ def get_memory_client(custom_instructions: str = None):
         except Exception as e:
             print(f"Warning: Error loading config.json: {e}")
         
-        # Load configuration from database (this will override config.json if present)
+        # Database config is IGNORED — config.json + env vars are the source of truth.
+        # The OpenMemory UI settings page can save configs to the DB, but those would
+        # override our carefully tuned Ollama settings with OpenAI defaults.
+        # Only extract custom_instructions from the database (non-destructive).
         try:
             db = SessionLocal()
             db_config = db.query(ConfigModel).filter(ConfigModel.key == "main").first()
-            
+
             if db_config:
+                print(f"⚠ Database config found but IGNORED for llm/embedder/vector_store (using {config_loaded_from})")
                 json_config = db_config.value
-                print("✓ Loading configuration from database (overriding config.json)")
-                
-                # Extract custom instructions from openmemory settings
+                # Only extract custom_instructions (user preferences, not provider settings)
                 if "openmemory" in json_config and "custom_instructions" in json_config["openmemory"]:
                     db_custom_instructions = json_config["openmemory"]["custom_instructions"]
-                
-                # Override with configurations from the database
-                if "mem0" in json_config:
-                    mem0_config = json_config["mem0"]
-                    
-                    # Update LLM configuration if available
-                    if "llm" in mem0_config and mem0_config["llm"] is not None:
-                        config["llm"] = mem0_config["llm"]
-                        
-                        # Fix Ollama URLs for Docker if needed
-                        if config["llm"].get("provider") == "ollama":
-                            config["llm"] = _fix_ollama_urls(config["llm"])
-                    
-                    # Update Embedder configuration if available
-                    if "embedder" in mem0_config and mem0_config["embedder"] is not None:
-                        config["embedder"] = mem0_config["embedder"]
-                        
-                        # Fix Ollama URLs for Docker if needed
-                        if config["embedder"].get("provider") == "ollama":
-                            config["embedder"] = _fix_ollama_urls(config["embedder"])
-
-                    if "vector_store" in mem0_config and mem0_config["vector_store"] is not None:
-                        config["vector_store"] = mem0_config["vector_store"]
-                    
-                    # Load graph_store from config.json/database
-                    if "graph_store" in mem0_config and mem0_config["graph_store"] is not None:
-                        config["graph_store"] = mem0_config["graph_store"]
-                        print(f"✓ Loaded graph_store config: {config['graph_store']}")
-                config_loaded_from = "database"
             else:
                 print(f"No configuration found in database, using {config_loaded_from}")
-                    
+
             db.close()
-                            
+
         except Exception as e:
-            print(f"Warning: Error loading configuration from database: {e}")
-            print(f"Using configuration from {config_loaded_from}")
-            # Continue with default configuration if database config can't be loaded
+            print(f"Warning: Error reading database: {e}")
+            # Continue with config.json configuration
 
         # Use custom_instructions parameter first, then fall back to database value
         instructions_to_use = custom_instructions or db_custom_instructions

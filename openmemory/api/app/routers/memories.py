@@ -350,6 +350,21 @@ async def create_memory(
     if isinstance(qdrant_response, dict) and 'results' in qdrant_response:
         for result in qdrant_response['results']:
             event = result.get('event', 'NONE')
+
+            # Handle DELETE events — mem0 already removed the vector from Qdrant, sync SQLite
+            if event == 'DELETE':
+                result_id = result.get('id')
+                if result_id:
+                    memory_id = UUID(result_id) if isinstance(result_id, str) else result_id
+                    try:
+                        existing = db.query(Memory).filter(Memory.id == memory_id).first()
+                        if existing:
+                            update_memory_state(db, memory_id, MemoryState.deleted, user.id)
+                            results_output.append({"id": str(memory_id), "memory": result.get('memory', ''), "event": "DELETE"})
+                    except Exception:
+                        logging.warning(f"Failed to sync DELETE for {result_id}")
+                continue
+
             if event not in ('ADD', 'UPDATE'):
                 logging.info(f"Skipping result with event={event}: {result.get('id', 'no-id')}")
                 continue
@@ -399,37 +414,10 @@ async def create_memory(
                 "event": event,
             })
 
-    # Step 4: Fallback - if no SQLite entries were created but add() succeeded,
-    # create a direct entry so the UI always shows something
     if not created_memories:
-        logging.warning("No ADD/UPDATE results from mem0 - creating direct SQLite entry for UI visibility")
-        memory_id = uuid4()
-        memory = Memory(
-            id=memory_id,
-            user_id=user.id,
-            app_id=app_obj.id,
-            content=request.text,
-            metadata_={**request.metadata, "storage_method": "direct_fallback"},
-            state=MemoryState.active
-        )
-        db.add(memory)
+        logging.info("No new memories added (all facts already known or no facts extracted)")
 
-        history = MemoryStatusHistory(
-            memory_id=memory_id,
-            changed_by=user.id,
-            old_state=MemoryState.active,
-            new_state=MemoryState.active
-        )
-        db.add(history)
-
-        created_memories.append(memory)
-        results_output.append({
-            "id": str(memory_id),
-            "memory": request.text,
-            "event": "ADD",
-        })
-
-    # Step 5: Commit and return consistent response
+    # Step 4: Commit and return consistent response
     db.commit()
     for memory in created_memories:
         db.refresh(memory)
@@ -507,24 +495,13 @@ async def delete_memories(
     # Delete from vector store then mark as deleted in database
     for memory_id in request.memory_ids:
         try:
-            memory_client.delete(str(memory_id))
+            memory_client.delete(memory_id=str(memory_id), user_id=request.user_id)
         except Exception as delete_error:
             logging.warning(f"Failed to delete memory {memory_id} from vector store: {delete_error}")
 
         update_memory_state(db, memory_id, MemoryState.deleted, user.id)
 
-    try:
-        memory_client = get_memory_client()
-        if memory_client:
-            for memory_id in request.memory_ids:
-                try:
-                    memory_client.delete(memory_id=str(memory_id), user_id=request.user_id)
-                except Exception as e:
-                    logging.warning(f"Failed to delete memory {memory_id} from Qdrant: {e}")
-    except Exception as e:
-        logging.warning(f"Failed to get memory client for deletion: {e}")
-    
-    return {"message": f"Successfully deleted {len(request.memory_ids)} memories from both stores"}
+    return {"message": f"Successfully deleted {len(request.memory_ids)} memories"}
 
 
 @router.post("/actions/archive")

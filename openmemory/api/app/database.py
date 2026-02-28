@@ -7,7 +7,10 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 # load .env file (make sure you have DATABASE_URL set)
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./openmemory.db")
+# Ensure the db directory exists (for volume-mounted SQLite persistence)
+os.makedirs("db", exist_ok=True)
+
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./db/openmemory.db")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set in environment")
 
