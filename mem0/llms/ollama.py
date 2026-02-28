@@ -49,20 +49,38 @@ class OllamaLLM(LLMBase):
         Returns:
             str or dict: The processed response.
         """
-        # Get the content from response
+        # Get the content and tool_calls from response
         if isinstance(response, dict):
             content = response["message"]["content"]
+            raw_tool_calls = response["message"].get("tool_calls")
         else:
             content = response.message.content
+            raw_tool_calls = getattr(response.message, "tool_calls", None)
 
         if tools:
-            processed_response = {
-                "content": content,
-                "tool_calls": [],
-            }
+            # Parse native Ollama tool_calls into mem0's expected format
+            parsed_tool_calls = []
+            if raw_tool_calls:
+                for tc in raw_tool_calls:
+                    if isinstance(tc, dict):
+                        func = tc.get("function", {})
+                        parsed_tool_calls.append({
+                            "name": func.get("name", ""),
+                            "arguments": func.get("arguments", {}),
+                        })
+                    else:
+                        # Ollama Python client returns ToolCall objects
+                        func = getattr(tc, "function", None)
+                        if func:
+                            parsed_tool_calls.append({
+                                "name": getattr(func, "name", ""),
+                                "arguments": getattr(func, "arguments", {}),
+                            })
 
-            # Ollama doesn't support tool calls in the same way, so we return the content
-            return processed_response
+            return {
+                "content": content,
+                "tool_calls": parsed_tool_calls,
+            }
         else:
             return content
 
@@ -112,6 +130,10 @@ class OllamaLLM(LLMBase):
 
         # Remove OpenAI-specific parameters that Ollama doesn't support
         params.pop("max_tokens", None)  # Ollama uses different parameter names
+
+        # Pass tools to Ollama for native tool calling support
+        if tools:
+            params["tools"] = tools
 
         response = self.client.chat(**params)
         return self._parse_response(response, tools)
