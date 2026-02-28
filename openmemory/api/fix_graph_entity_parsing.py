@@ -105,9 +105,43 @@ DO NOT provide explanations or descriptions - only call the function."""
     return entity_type_map
 
 
+def _match_to_entity_map(name, entity_type_map_keys):
+    """
+    Match a relationship entity name to the closest key in entity_type_map.
+
+    The LLM may return names like "Whiskers the cat" while entity_type_map has
+    "whiskers". After _remove_spaces_from_entities normalizes to "whiskers_the_cat",
+    the lookup fails. This function tries:
+      1. Exact match
+      2. A map key that is a prefix of the name (e.g. "whiskers" matches "whiskers_the_cat")
+      3. The name is a prefix of a map key
+    Returns the matched key, or the original name if no match found.
+    """
+    if name in entity_type_map_keys:
+        return name
+
+    # Try: map key is a prefix of the name (longest prefix wins)
+    prefix_matches = [k for k in entity_type_map_keys if name.startswith(k)]
+    if prefix_matches:
+        return max(prefix_matches, key=len)
+
+    # Try: name is a prefix of a map key
+    prefix_matches = [k for k in entity_type_map_keys if k.startswith(name)]
+    if prefix_matches:
+        return max(prefix_matches, key=len)
+
+    # Try: either contains the other (substring match, longest wins)
+    substring_matches = [k for k in entity_type_map_keys if k in name or name in k]
+    if substring_matches:
+        return max(substring_matches, key=len)
+
+    return name
+
+
 def _patched_establish_relations(self, data, filters, entity_type_map):
     """
     Patched version with improved prompt for qwen3:4b relationship extraction.
+    Includes fuzzy entity matching and self-reference filtering.
     """
     from mem0.graphs.tools import RELATIONS_TOOL, RELATIONS_STRUCT_TOOL
 
@@ -149,9 +183,36 @@ DO NOT provide explanations or descriptions - only call the function with the re
     if extracted_entities.get("tool_calls"):
         entities = extracted_entities["tool_calls"][0].get("arguments", {}).get("entities", [])
 
+    # Apply mem0's standard normalization (lowercase + underscore)
     entities = self._remove_spaces_from_entities(entities)
-    logger.debug(f"Extracted entities: {entities}")
-    return entities
+
+    # Normalize source/destination to match entity_type_map keys via fuzzy matching
+    map_keys = set(entity_type_map.keys())
+    normalized_entities = []
+    for item in entities:
+        src = _match_to_entity_map(item["source"], map_keys)
+        dst = _match_to_entity_map(item["destination"], map_keys)
+
+        if src != item["source"] or dst != item["destination"]:
+            logger.debug(f"Entity remap: ({item['source']} -> {src}), ({item['destination']} -> {dst})")
+
+        # Filter out self-referencing edges
+        if src == dst:
+            logger.debug(f"Filtered self-reference: {src} -[{item['relationship']}]-> {dst}")
+            continue
+
+        # Clean verbose relationship names (e.g. "has_a_pet_named" -> "has_pet")
+        rel = item["relationship"]
+        rel = re.sub(r'_a_|_an_|_the_', '_', rel)
+        rel = re.sub(r'_named$|_called$', '', rel)
+
+        item["source"] = src
+        item["destination"] = dst
+        item["relationship"] = rel
+        normalized_entities.append(item)
+
+    logger.debug(f"Extracted entities (after normalization): {normalized_entities}")
+    return normalized_entities
 
 
 def apply_patch():

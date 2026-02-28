@@ -276,25 +276,26 @@ async def create_memory(
     request: CreateMemoryRequest,
     db: Session = Depends(get_db)
 ):
+    from uuid import uuid4
+
     user = db.query(User).filter(User.user_id == request.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     # Extract text from messages if text is not provided
     if not request.text and request.messages:
         request.text = " ".join([
-            msg.get("content", "") 
-            for msg in request.messages 
+            msg.get("content", "")
+            for msg in request.messages
             if msg.get("content")
         ])
-    
-    # Validate that we have text to process
+
     if not request.text:
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail="Either 'text' or 'messages' must be provided"
         )
-        
+
     # Get or create app
     app_obj = db.query(App).filter(App.name == request.app,
                                    App.owner_id == user.id).first()
@@ -304,25 +305,22 @@ async def create_memory(
         db.commit()
         db.refresh(app_obj)
 
-    # Check if app is active
     if not app_obj.is_active:
         raise HTTPException(status_code=403, detail=f"App {request.app} is currently paused on OpenMemory. Cannot create new memories.")
 
     logging.info(f"Creating memory for user_id: {request.user_id} with app: {request.app}")
-    
-    # Track processed memory IDs to prevent duplicates across all processing paths
-    processed_memory_ids = set()
-    
-    # Try to get memory client safely
+
+    # Step 1: Get memory client
     try:
         memory_client = get_memory_client()
         if not memory_client:
             raise Exception("Memory client is not available")
     except Exception as client_error:
-        logging.warning(f"Memory client unavailable: {client_error}. Creating memory in database only.")
-        return {"error": str(client_error)}
+        logging.warning(f"Memory client unavailable: {client_error}.")
+        raise HTTPException(status_code=503, detail=f"Memory service unavailable: {str(client_error)}")
 
-    # Try automatic memory extraction first
+    # Step 2: Call mem0 add()
+    qdrant_response = None
     try:
         qdrant_response = memory_client.add(
             request.text,
@@ -333,395 +331,111 @@ async def create_memory(
             },
             infer=request.infer
         )
-        
         logging.info(f"Memory add response: {qdrant_response}")
-        
-        # Check if entities were extracted
-        if 'relations' in qdrant_response:
-            logging.info(f"Entities extracted: {len(qdrant_response['relations'].get('added_entities', []))}")
-            if qdrant_response['relations'].get('added_entities'):
-                logging.info(f"Added entities: {qdrant_response['relations']['added_entities']}")
-        
-        # FALLBACK: If mem0 returns empty results, store the text directly with chunking
-        if isinstance(qdrant_response, dict) and 'results' in qdrant_response:
-            if not qdrant_response['results']:
-                logging.warning("mem0 returned empty results - using enhanced fallback: chunking and storing in both vector and SQL")
-                
-                # Import chunking utilities
-                from uuid import uuid4
-                import re
-                
-                def chunk_text(text, target_chunk_size=600, max_chunk_size=1000):
-                    """Dynamically chunk text based on content structure and optimal size for LLM processing"""
-                    if len(text) <= target_chunk_size:
-                        return [text]
-                    
-                    # Split by paragraphs first, then by sentences if needed
-                    paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
-                    
-                    chunks = []
-                    current_chunk = ""
-                    
-                    for paragraph in paragraphs:
-                        # If this paragraph alone is too long, split it by sentences
-                        if len(paragraph) > max_chunk_size:
-                            # Split by sentences (rough approximation)
-                            sentences = [s.strip() + '.' for s in paragraph.split('.') if s.strip()]
-                            
-                            for sentence in sentences:
-                                if len(current_chunk) + len(sentence) > target_chunk_size and current_chunk:
-                                    chunks.append(current_chunk.strip())
-                                    current_chunk = sentence
-                                else:
-                                    current_chunk = current_chunk + ' ' + sentence if current_chunk else sentence
-                        else:
-                            # Normal paragraph processing - use target size for better chunking
-                            if len(current_chunk) + len(paragraph) > target_chunk_size and current_chunk:
-                                chunks.append(current_chunk.strip())
-                                current_chunk = paragraph
-                            else:
-                                current_chunk = current_chunk + '\n\n' + paragraph if current_chunk else paragraph
-                    
-                    # Add the last chunk
-                    if current_chunk.strip():
-                        chunks.append(current_chunk.strip())
-                    
-                    # Post-process: split oversized chunks by word boundaries
-                    final_chunks = []
-                    for chunk in chunks:
-                        if len(chunk) <= max_chunk_size:
-                            final_chunks.append(chunk)
-                        else:
-                            # Split oversized chunk by words
-                            words = chunk.split()
-                            temp_chunk = ""
-                            
-                            for word in words:
-                                if len(temp_chunk) + len(word) + 1 > target_chunk_size and temp_chunk:
-                                    final_chunks.append(temp_chunk.strip())
-                                    temp_chunk = word
-                                else:
-                                    temp_chunk = temp_chunk + ' ' + word if temp_chunk else word
-                            
-                            if temp_chunk.strip():
-                                final_chunks.append(temp_chunk.strip())
-                    
-                    # Ensure we don't return empty chunks
-                    final_chunks = [chunk for chunk in final_chunks if chunk.strip()]
-                    
-                    logging.info(f"Dynamic chunking: {len(text)} chars -> {len(final_chunks)} chunks (target: {target_chunk_size}, max: {max_chunk_size})")
-                    return final_chunks if final_chunks else [text]
-                
-                # Chunk the text for better processing
-                text_chunks = chunk_text(request.text)
-                logging.info(f"Split long text into {len(text_chunks)} chunks for processing")
-                
-                created_memories = []
-                
-                # Process each chunk through mem0 individually
-                for i, chunk in enumerate(text_chunks):
-                    try:
-                        chunk_result = memory_client.add(
-                            chunk,
-                            user_id=request.user_id,
-                            metadata={
-                                **request.metadata,
-                                "chunk_index": i,
-                                "total_chunks": len(text_chunks),
-                                "is_chunked_document": True,
-                                "original_length": len(request.text)
-                            }
-                        )
-                        
-                        # Process chunk results
-                        if chunk_result and chunk_result.get('results'):
-                            for result in chunk_result['results']:
-                                if 'id' in result:
-                                    # Convert string ID from mem0 to UUID for database
-                                    memory_id = UUID(result['id']) if isinstance(result['id'], str) else result['id']
-                                    
-                                    # Create memory in database
-                                    memory = Memory(
-                                        id=memory_id,
-                                        user_id=user.id,
-                                        app_id=app_obj.id,
-                                        content=result.get('memory', chunk),
-                                        metadata_={
-                                            **request.metadata,
-                                            "chunk_index": i,
-                                            "total_chunks": len(text_chunks),
-                                            "is_chunked_document": True
-                                        },
-                                        state=MemoryState.active
-                                    )
-                                    db.add(memory)
-                                    created_memories.append(memory)
-                                    
-                                    # Create history entry
-                                    history = MemoryStatusHistory(
-                                        memory_id=memory_id,
-                                        changed_by=user.id,
-                                        old_state=MemoryState.active,
-                                        new_state=MemoryState.active
-                                    )
-                                    db.add(history)
-                        
-                        # If chunk returned no results, use direct storage fallback
-                        if not chunk_result.get('results'):
-                            logging.info(f"Chunk {i+1} returned no results - using direct vector storage")
-                            
-                            memory_id = uuid4()
-                            
-                            # Store in database only if not already processed
-                            if str(memory_id) not in processed_memory_ids:
-                                memory = Memory(
-                                    id=memory_id,
-                                    user_id=user.id,
-                                    app_id=app_obj.id,
-                                    content=chunk,
-                                    metadata_={
-                                        **request.metadata,
-                                        "chunk_index": i,
-                                        "total_chunks": len(text_chunks),
-                                        "is_chunked_document": True,
-                                        "storage_method": "direct_vector_no_results"
-                                    },
-                                    state=MemoryState.active
-                                )
-                                db.add(memory)
-                                created_memories.append(memory)
-                                processed_memory_ids.add(str(memory_id))
-                                
-                                # Create history entry
-                                history = MemoryStatusHistory(
-                                    memory_id=memory_id,
-                                    changed_by=user.id,
-                                    old_state=MemoryState.active,
-                                    new_state=MemoryState.active
-                                )
-                                db.add(history)
-                            
-                            # Store directly in Qdrant for semantic search - use improved method
-                            qdrant_stored = False
-                            try:
-                                if hasattr(memory_client, 'vector_store') and memory_client.vector_store and hasattr(memory_client, 'embedder'):
-                                    # Get embedding for the chunk
-                                    embedding = memory_client.embedder.embed_query(chunk)
-                                    logging.info(f"Created embedding for chunk {i+1}: {len(embedding)} dimensions")
-                                    
-                                    # Try using the client's upsert method directly
-                                    if hasattr(memory_client.vector_store, 'client') and hasattr(memory_client.vector_store.client, 'upsert'):
-                                        from qdrant_client.models import PointStruct
-                                        
-                                        points = [PointStruct(
-                                            id=f"{memory_id}_chunk_{i}",
-                                            vector=embedding,
-                                            payload={
-                                                "user_id": request.user_id,
-                                                "chunk_index": i,
-                                                "total_chunks": len(text_chunks),
-                                                "storage_method": "direct_no_results",
-                                                "memory_id": str(memory_id),
-                                                "text": chunk
-                                            }
-                                        )]
-                                        
-                                        # Get collection name from vector store
-                                        collection_name = getattr(memory_client.vector_store, 'collection_name', 'mem0')
-                                        
-                                        result = memory_client.vector_store.client.upsert(
-                                            collection_name=collection_name,
-                                            points=points
-                                        )
-                                        
-                                        logging.info(f"✅ Stored chunk {i+1} in Qdrant using client.upsert: {result}")
-                                        qdrant_stored = True
-                                        
-                                    elif hasattr(memory_client.vector_store, 'insert'):
-                                        # Fallback to insert method
-                                        memory_client.vector_store.insert(
-                                            vectors=[embedding],
-                                            payloads=[{
-                                                "user_id": request.user_id,
-                                                "chunk_index": i,
-                                                "total_chunks": len(text_chunks),
-                                                "storage_method": "direct_no_results",
-                                                "memory_id": str(memory_id),
-                                                "text": chunk
-                                            }],
-                                            ids=[f"{memory_id}_chunk_{i}"]
-                                        )
-                                        logging.info(f"✅ Stored chunk {i+1} in Qdrant using insert method")
-                                        qdrant_stored = True
-                                        
-                            except Exception as vector_error:
-                                logging.error(f"❌ Failed to store chunk {i+1} in Qdrant: {vector_error}")
-                                import traceback
-                                logging.error(f"Qdrant storage traceback: {traceback.format_exc()}")
-                            
-                            if not qdrant_stored:
-                                logging.warning(f"⚠️ Chunk {i+1} stored in SQLite but NOT in Qdrant - semantic search will not find this chunk")
-                        
-                        logging.info(f"Processed chunk {i+1}/{len(text_chunks)}: {len(chunk_result.get('results', []))} memories")
-                        
-                    except Exception as chunk_error:
-                        logging.error(f"Error processing chunk {i}: {chunk_error}")
-                        
-                        # Enhanced fallback: store chunk directly in both SQLite AND Qdrant
-                        logging.info(f"Chunk {i} failed mem0 processing - using direct vector storage fallback")
-                        
-                        memory_id = uuid4()
-                        
-                        # Store in database first only if not already processed
-                        if str(memory_id) not in processed_memory_ids:
-                            memory = Memory(
-                                id=memory_id,
-                                user_id=user.id,
-                                app_id=app_obj.id,
-                                content=chunk,
-                                metadata_={
-                                    **request.metadata,
-                                    "chunk_index": i,
-                                    "total_chunks": len(text_chunks),
-                                    "is_chunked_document": True,
-                                    "storage_method": "direct_vector_fallback"
-                                },
-                                state=MemoryState.active
-                            )
-                            db.add(memory)
-                            created_memories.append(memory)
-                            processed_memory_ids.add(str(memory_id))
-                        
-                        # Create history entry
-                        history = MemoryStatusHistory(
-                            memory_id=memory_id,
-                            changed_by=user.id,
-                            old_state=MemoryState.active,
-                            new_state=MemoryState.active
-                        )
-                        db.add(history)
-                        
-                        # ALSO store directly in Qdrant for semantic search
-                        qdrant_stored = False
-                        try:
-                            # Access the vector store directly to store this chunk
-                            if hasattr(memory_client, 'vector_store') and memory_client.vector_store and hasattr(memory_client, 'embedder'):
-                                # Get embedding for the chunk
-                                embedding = memory_client.embedder.embed_query(chunk)
-                                logging.info(f"Created embedding for chunk {i} exception fallback: {len(embedding)} dimensions")
-                                
-                                # Try using the client's upsert method directly first
-                                if hasattr(memory_client.vector_store, 'client') and hasattr(memory_client.vector_store.client, 'upsert'):
-                                    from qdrant_client.models import PointStruct
-                                    
-                                    points = [PointStruct(
-                                        id=f"{memory_id}_chunk_{i}",
-                                        vector=embedding,
-                                        payload={
-                                            "user_id": request.user_id,
-                                            "chunk_index": i,
-                                            "total_chunks": len(text_chunks),
-                                            "storage_method": "direct_fallback",
-                                            "memory_id": str(memory_id),
-                                            "text": chunk
-                                        }
-                                    )]
-                                    
-                                    # Get collection name from vector store
-                                    collection_name = getattr(memory_client.vector_store, 'collection_name', 'mem0')
-                                    
-                                    result = memory_client.vector_store.client.upsert(
-                                        collection_name=collection_name,
-                                        points=points
-                                    )
-                                    
-                                    logging.info(f"✅ Stored chunk {i} in Qdrant using client.upsert (exception fallback): {result}")
-                                    qdrant_stored = True
-                                    
-                                elif hasattr(memory_client.vector_store, 'insert'):
-                                    # Fallback to insert method
-                                    memory_client.vector_store.insert(
-                                        vectors=[embedding],
-                                        payloads=[{
-                                            "user_id": request.user_id,
-                                            "chunk_index": i,
-                                            "total_chunks": len(text_chunks),
-                                            "storage_method": "direct_fallback",
-                                            "memory_id": str(memory_id),
-                                            "text": chunk
-                                        }],
-                                        ids=[f"{memory_id}_chunk_{i}"]
-                                    )
-                                    logging.info(f"✅ Stored chunk {i} in Qdrant using insert method (exception fallback)")
-                                    qdrant_stored = True
-                                    
-                        except Exception as vector_error:
-                            logging.error(f"❌ Failed to store chunk {i} in Qdrant (exception fallback): {vector_error}")
-                            import traceback
-                            logging.error(f"Qdrant storage traceback: {traceback.format_exc()}")
-                        
-                        if not qdrant_stored:
-                            logging.warning(f"⚠️ Chunk {i} stored in SQLite but NOT in Qdrant - semantic search will not find this chunk")
-                
-                db.commit()
-                
-                logging.info(f"✅ Enhanced fallback complete: {len(created_memories)} memories stored from {len(text_chunks)} chunks")
-                
-                # Return the first memory as representative
-                return created_memories[0] if created_memories else None
-            
-            # Process normal results
-            created_memories = []
-            
-            for result in qdrant_response['results']:
-                if result['event'] in ['ADD', 'UPDATE']:
-                    # Ensure ID is always a UUID object
-                    memory_id = UUID(result['id']) if isinstance(result['id'], str) else result['id']
-                    
-                    # Skip if already processed to prevent duplicates
-                    if str(memory_id) in processed_memory_ids:
-                        continue
-                        
-                    existing_memory = db.query(Memory).filter(Memory.id == memory_id).first()
-                    
-                    if existing_memory:
-                        existing_memory.state = MemoryState.active
-                        existing_memory.content = result['memory']
-                        memory = existing_memory
-                    else:
-                        memory = Memory(
-                            id=memory_id,
-                            user_id=user.id,
-                            app_id=app_obj.id,
-                            content=result['memory'],
-                            metadata_=request.metadata,
-                            state=MemoryState.active
-                        )
-                        db.add(memory)
-                    
-                    history = MemoryStatusHistory(
-                        memory_id=memory_id,
-                        changed_by=user.id,
-                        old_state=MemoryState.deleted if existing_memory else MemoryState.deleted,
-                        new_state=MemoryState.active
-                    )
-                    db.add(history)
-                    
-                    created_memories.append(memory)
-                    processed_memory_ids.add(str(memory_id))
-            
-            if created_memories:
-                db.commit()
-                for memory in created_memories:
-                    db.refresh(memory)
-                
-                return created_memories[0]
-                
-    except Exception as qdrant_error:
-        logging.error(f"Qdrant operation failed: {qdrant_error}")
+
+        if isinstance(qdrant_response, dict) and 'relations' in qdrant_response:
+            logging.info(f"Graph relations: {qdrant_response['relations']}")
+
+    except Exception as add_error:
+        logging.error(f"memory_client.add() failed: {add_error}")
         import traceback
         traceback.print_exc()
-        return {"error": str(qdrant_error)}
+        raise HTTPException(status_code=500, detail=f"Memory extraction failed: {str(add_error)}")
+
+    # Step 3: Process results - create SQLite entries for each ADD/UPDATE
+    created_memories = []
+    results_output = []
+    processed_ids: Set[str] = set()
+
+    if isinstance(qdrant_response, dict) and 'results' in qdrant_response:
+        for result in qdrant_response['results']:
+            event = result.get('event', 'NONE')
+            if event not in ('ADD', 'UPDATE'):
+                logging.info(f"Skipping result with event={event}: {result.get('id', 'no-id')}")
+                continue
+
+            result_id = result.get('id')
+            if not result_id:
+                continue
+
+            memory_id = UUID(result_id) if isinstance(result_id, str) else result_id
+            id_str = str(memory_id)
+            if id_str in processed_ids:
+                continue
+            processed_ids.add(id_str)
+
+            memory_text = result.get('memory', request.text)
+
+            existing_memory = db.query(Memory).filter(Memory.id == memory_id).first()
+            if existing_memory:
+                old_state = existing_memory.state
+                existing_memory.state = MemoryState.active
+                existing_memory.content = memory_text
+                memory = existing_memory
+            else:
+                old_state = None
+                memory = Memory(
+                    id=memory_id,
+                    user_id=user.id,
+                    app_id=app_obj.id,
+                    content=memory_text,
+                    metadata_=request.metadata,
+                    state=MemoryState.active
+                )
+                db.add(memory)
+
+            history = MemoryStatusHistory(
+                memory_id=memory_id,
+                changed_by=user.id,
+                old_state=old_state if old_state else MemoryState.active,
+                new_state=MemoryState.active
+            )
+            db.add(history)
+
+            created_memories.append(memory)
+            results_output.append({
+                "id": id_str,
+                "memory": memory_text,
+                "event": event,
+            })
+
+    # Step 4: Fallback - if no SQLite entries were created but add() succeeded,
+    # create a direct entry so the UI always shows something
+    if not created_memories:
+        logging.warning("No ADD/UPDATE results from mem0 - creating direct SQLite entry for UI visibility")
+        memory_id = uuid4()
+        memory = Memory(
+            id=memory_id,
+            user_id=user.id,
+            app_id=app_obj.id,
+            content=request.text,
+            metadata_={**request.metadata, "storage_method": "direct_fallback"},
+            state=MemoryState.active
+        )
+        db.add(memory)
+
+        history = MemoryStatusHistory(
+            memory_id=memory_id,
+            changed_by=user.id,
+            old_state=MemoryState.active,
+            new_state=MemoryState.active
+        )
+        db.add(history)
+
+        created_memories.append(memory)
+        results_output.append({
+            "id": str(memory_id),
+            "memory": request.text,
+            "event": "ADD",
+        })
+
+    # Step 5: Commit and return consistent response
+    db.commit()
+    for memory in created_memories:
+        db.refresh(memory)
+
+    logging.info(f"create_memory complete: {len(created_memories)} memories saved to SQLite")
+    return {"results": results_output, "count": len(results_output)}
 
 
 # Enhanced get memory with graph entities
