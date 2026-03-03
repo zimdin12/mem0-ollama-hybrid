@@ -1,0 +1,15 @@
+{
+  "name": "@openmemory/mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for OpenMemory — hybrid vector + graph memory via mem0",
+  "type": "module",
+  "bin": {
+    "openmemory-mcp": "./server.js"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  }
+}

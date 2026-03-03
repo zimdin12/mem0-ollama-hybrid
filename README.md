@@ -1,171 +1,270 @@
-<p align="center">
-  <a href="https://github.com/mem0ai/mem0">
-    <img src="docs/images/banner-sm.png" width="800px" alt="Mem0 - The Memory Layer for Personalized AI">
-  </a>
-</p>
-<p align="center" style="display: flex; justify-content: center; gap: 20px; align-items: center;">
-  <a href="https://trendshift.io/repositories/11194" target="blank">
-    <img src="https://trendshift.io/api/badge/repositories/11194" alt="mem0ai%2Fmem0 | Trendshift" width="250" height="55"/>
-  </a>
-</p>
+# mem0 — Local Hybrid Memory (Ollama Fork)
 
-<p align="center">
-  <a href="https://mem0.ai">Learn more</a>
-  ·
-  <a href="https://mem0.dev/DiG">Join Discord</a>
-  ·
-  <a href="https://mem0.dev/demo">Demo</a>
-  ·
-  <a href="https://mem0.dev/openmemory">OpenMemory</a>
-</p>
+Fork of [mem0ai/mem0](https://github.com/mem0ai/mem0) that runs **100% locally** using Ollama. No OpenAI, no cloud APIs, no API keys needed.
 
-<p align="center">
-  <a href="https://mem0.dev/DiG">
-    <img src="https://img.shields.io/badge/Discord-%235865F2.svg?&logo=discord&logoColor=white" alt="Mem0 Discord">
-  </a>
-  <a href="https://pepy.tech/project/mem0ai">
-    <img src="https://img.shields.io/pypi/dm/mem0ai" alt="Mem0 PyPI - Downloads">
-  </a>
-  <a href="https://github.com/mem0ai/mem0">
-    <img src="https://img.shields.io/github/commit-activity/m/mem0ai/mem0?style=flat-square" alt="GitHub commit activity">
-  </a>
-  <a href="https://pypi.org/project/mem0ai" target="blank">
-    <img src="https://img.shields.io/pypi/v/mem0ai?color=%2334D058&label=pypi%20package" alt="Package version">
-  </a>
-  <a href="https://www.npmjs.com/package/mem0ai" target="blank">
-    <img src="https://img.shields.io/npm/v/mem0ai" alt="Npm package">
-  </a>
-  <a href="https://www.ycombinator.com/companies/mem0">
-    <img src="https://img.shields.io/badge/Y%20Combinator-S24-orange?style=flat-square" alt="Y Combinator S24">
-  </a>
-</p>
+Provides a persistent hybrid memory system (vector + graph) for AI assistants, agents, and coding tools.
 
-<p align="center">
-  <a href="https://mem0.ai/research"><strong>📄 Building Production-Ready AI Agents with Scalable Long-Term Memory →</strong></a>
-</p>
-<p align="center">
-  <strong>⚡ +26% Accuracy vs. OpenAI Memory • 🚀 91% Faster • 💰 90% Fewer Tokens</strong>
-</p>
+## What It Does
 
-> **🎉 mem0ai v1.0.0 is now available!** This major release includes API modernization, improved vector store support, and enhanced GCP integration. [See migration guide →](MIGRATION_GUIDE_v1.0.md)
+When you store a memory like *"Steven prefers TypeScript and uses an RTX 4090"*, mem0:
 
-##  🔥 Research Highlights
-- **+26% Accuracy** over OpenAI Memory on the LOCOMO benchmark
-- **91% Faster Responses** than full-context, ensuring low-latency at scale
-- **90% Lower Token Usage** than full-context, cutting costs without compromise
-- [Read the full paper](https://mem0.ai/research)
+1. **Extracts facts** → individual memory entries in the vector store
+2. **Extracts entities** → `Steven`, `TypeScript`, `RTX 4090` as graph nodes
+3. **Extracts relationships** → `Steven --prefers--> TypeScript`, `Steven --uses--> RTX 4090`
+4. **Deduplicates** → if you already stored similar info, it updates instead of duplicating
 
-# Introduction
+Searching for *"what GPU does Steven use"* returns results from both the vector store (semantic similarity) and the knowledge graph (entity relationships).
 
-[Mem0](https://mem0.ai) ("mem-zero") enhances AI assistants and agents with an intelligent memory layer, enabling personalized AI interactions. It remembers user preferences, adapts to individual needs, and continuously learns over time—ideal for customer support chatbots, AI assistants, and autonomous systems.
+## Architecture
 
-### Key Features & Use Cases
+```
+┌─────────────────────────────────────────────────┐
+│                  Clients                         │
+│  OpenClaw · Claude Code · OpenCode · Any MCP     │
+└──────────────┬──────────────────┬───────────────┘
+               │  REST API        │  MCP (SSE)
+        ┌──────▼──────────────────▼───────┐
+        │      OpenMemory API (:8765)     │
+        │         (FastAPI + mem0)        │
+        └──┬──────────┬──────────┬────────┘
+           │          │          │
+     ┌─────▼───┐ ┌───▼────┐ ┌──▼──────┐
+     │ Qdrant  │ │ Neo4j  │ │ Ollama  │
+     │ :6333   │ │ :8687  │ │ :11434  │
+     │ vectors │ │ graph  │ │ LLM+Emb │
+     └─────────┘ └────────┘ └─────────┘
+```
 
-**Core Capabilities:**
-- **Multi-Level Memory**: Seamlessly retains User, Session, and Agent state with adaptive personalization
-- **Developer-Friendly**: Intuitive API, cross-platform SDKs, and a fully managed service option
+| Component | Purpose | Port |
+|-----------|---------|------|
+| **OpenMemory API** | REST + MCP server, orchestrates mem0 | 8765 |
+| **OpenMemory UI** | Web dashboard for browsing memories | 3100 |
+| **Qdrant** | Vector store (semantic search) | 6333 |
+| **Neo4j** | Graph store (entity relationships) | 8474 / 8687 |
+| **Ollama** | LLM for extraction, embeddings | 11434 |
+| **SQLite** | Metadata, audit trail | file |
 
-**Applications:**
-- **AI Assistants**: Consistent, context-rich conversations
-- **Customer Support**: Recall past tickets and user history for tailored help
-- **Healthcare**: Track patient preferences and history for personalized care
-- **Productivity & Gaming**: Adaptive workflows and environments based on user behavior
+## Models Used (via Ollama)
 
-## 🚀 Quickstart Guide <a name="quickstart"></a>
+| Role | Model | Size | Notes |
+|------|-------|------|-------|
+| Fact & entity extraction | `qwen3:4b-instruct-2507-q4_K_M` | ~2.5 GB | Must be `instruct` variant (thinking mode breaks tool calls) |
+| Embeddings | `qwen3-embedding:0.6b` | ~0.5 GB | 1024 dimensions, cosine similarity |
 
-Choose between our hosted platform or self-hosted package:
+Both run on GPU via Ollama. Total VRAM: ~3 GB.
 
-### Hosted Platform
+## Setup
 
-Get up and running in minutes with automatic updates, analytics, and enterprise security.
+This fork is designed to run as part of a Docker Compose stack. See the [parent repo](https://github.com/zimdin12/openclaw-adv-mem-local) for the full deployment.
 
-1. Sign up on [Mem0 Platform](https://app.mem0.ai)
-2. Embed the memory layer via SDK or API keys
-
-### Self-Hosted (Open Source)
-
-Install the sdk via pip:
+### Standalone (if running outside the parent stack)
 
 ```bash
-pip install mem0ai
+# 1. Clone
+git clone https://github.com/zimdin12/mem0-ollama-hybrid.git
+cd mem0-ollama-hybrid
+
+# 2. Pull Ollama models
+ollama pull qwen3:4b-instruct-2507-q4_K_M
+ollama pull qwen3-embedding:0.6b
+
+# 3. Start services
+cd openmemory
+docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
+
+# 4. Verify
+curl http://localhost:8765/docs    # API docs
+open http://localhost:3100          # Memory UI
 ```
 
-Install sdk via npm:
-```bash
-npm install mem0ai
+### Environment Variables
+
+```env
+# LLM (extraction)
+LLM_PROVIDER=ollama
+LLM_MODEL=qwen3:4b-instruct-2507-q4_K_M
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+
+# Embeddings
+EMBEDDER_PROVIDER=ollama
+EMBEDDER_MODEL=qwen3-embedding:0.6b
+EMBEDDER_OLLAMA_BASE_URL=http://host.docker.internal:11434
+
+# Graph (Neo4j)
+NEO4J_URI=bolt://neo4j:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=openmemory
+
+# Vector (Qdrant)
+VECTOR_STORE_PROVIDER=qdrant
+QDRANT_HOST=qdrant
+QDRANT_PORT=6333
+QDRANT_COLLECTION=openmemory
+QDRANT_EMBEDDING_DIMS=1024
 ```
 
-### Basic Usage
+## Connecting Clients
 
-Mem0 requires an LLM to function, with `gpt-4.1-nano-2025-04-14 from OpenAI as the default. However, it supports a variety of LLMs; for details, refer to our [Supported LLMs documentation](https://docs.mem0.ai/components/llms/overview).
+### OpenClaw
 
-First step is to instantiate the memory:
+Uses the bundled plugin at `config/extensions/openmemory/`. Config in `openclaw.json`:
 
-```python
-from openai import OpenAI
-from mem0 import Memory
-
-openai_client = OpenAI()
-memory = Memory()
-
-def chat_with_memories(message: str, user_id: str = "default_user") -> str:
-    # Retrieve relevant memories
-    relevant_memories = memory.search(query=message, user_id=user_id, limit=3)
-    memories_str = "\n".join(f"- {entry['memory']}" for entry in relevant_memories["results"])
-
-    # Generate Assistant response
-    system_prompt = f"You are a helpful AI. Answer the question based on query and memories.\nUser Memories:\n{memories_str}"
-    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": message}]
-    response = openai_client.chat.completions.create(model="gpt-4.1-nano-2025-04-14", messages=messages)
-    assistant_response = response.choices[0].message.content
-
-    # Create new memories from the conversation
-    messages.append({"role": "assistant", "content": assistant_response})
-    memory.add(messages, user_id=user_id)
-
-    return assistant_response
-
-def main():
-    print("Chat with AI (type 'exit' to quit)")
-    while True:
-        user_input = input("You: ").strip()
-        if user_input.lower() == 'exit':
-            print("Goodbye!")
-            break
-        print(f"AI: {chat_with_memories(user_input)}")
-
-if __name__ == "__main__":
-    main()
-```
-
-For detailed integration steps, see the [Quickstart](https://docs.mem0.ai/quickstart) and [API Reference](https://docs.mem0.ai/api-reference).
-
-## 🔗 Integrations & Demos
-
-- **ChatGPT with Memory**: Personalized chat powered by Mem0 ([Live Demo](https://mem0.dev/demo))
-- **Browser Extension**: Store memories across ChatGPT, Perplexity, and Claude ([Chrome Extension](https://chromewebstore.google.com/detail/onihkkbipkfeijkadecaafbgagkhglop?utm_source=item-share-cb))
-- **Langgraph Support**: Build a customer bot with Langgraph + Mem0 ([Guide](https://docs.mem0.ai/integrations/langgraph))
-- **CrewAI Integration**: Tailor CrewAI outputs with Mem0 ([Example](https://docs.mem0.ai/integrations/crewai))
-
-## 📚 Documentation & Support
-
-- Full docs: https://docs.mem0.ai
-- Community: [Discord](https://mem0.dev/DiG) · [Twitter](https://x.com/mem0ai)
-- Contact: founders@mem0.ai
-
-## Citation
-
-We now have a paper you can cite:
-
-```bibtex
-@article{mem0,
-  title={Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory},
-  author={Chhikara, Prateek and Khant, Dev and Aryan, Saket and Singh, Taranjeet and Yadav, Deshraj},
-  journal={arXiv preprint arXiv:2504.19413},
-  year={2025}
+```json
+{
+  "plugins": {
+    "entries": {
+      "openmemory": {
+        "enabled": true,
+        "config": {
+          "apiUrl": "http://openmemory-mcp:8765",
+          "userId": "steven"
+        }
+      }
+    }
+  }
 }
 ```
 
-## ⚖️ License
+### Claude Code
 
-Apache 2.0 — see the [LICENSE](https://github.com/mem0ai/mem0/blob/main/LICENSE) file for details.
+Two parts: **MCP server** (provides 4 memory tools) and **Skill** (tells Claude when/how to use them).
+
+```bash
+cd mcp-server && npm install
+```
+
+**1. Register MCP server** (one of these methods):
+
+CLI:
+```bash
+claude mcp add openmemory -- node /path/to/mcp-server/server.js
+```
+
+Or add to `~/.claude.json` (global) or `.mcp.json` (per-project):
+```json
+{
+  "mcpServers": {
+    "openmemory": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/path/to/mcp-server/server.js"],
+      "env": {
+        "MEMORY_API_URL": "http://localhost:8765",
+        "MEMORY_USER_ID": "steven"
+      }
+    }
+  }
+}
+```
+
+**2. Install skill** (one of these methods):
+
+CLI:
+```bash
+claude skill add /path/to/mcp-server/SKILL.md
+```
+
+Or copy `SKILL.md` into your project's `.claude/skills/` directory.
+
+The skill adds auto-recall at conversation start, auto-capture of durable facts, and guidelines for writing good memories. It requires the MCP server to be registered (the skill references the MCP tools).
+
+### OpenCode (MCP only)
+
+Add to your OpenCode MCP config:
+
+```json
+{
+  "openmemory": {
+    "type": "stdio",
+    "command": "node",
+    "args": ["/path/to/mcp-server/server.js"],
+    "env": {
+      "MEMORY_API_URL": "http://localhost:8765",
+      "MEMORY_USER_ID": "steven"
+    }
+  }
+}
+```
+
+### SSE Endpoint (any MCP client)
+
+```
+http://localhost:8765/mcp/{client_name}/sse/{user_id}
+```
+
+Example: `http://localhost:8765/mcp/opencode/sse/steven`
+
+### REST API
+
+```bash
+# Search memories
+curl "http://localhost:8765/api/v1/memories/?user_id=steven&search_query=gpu&size=5"
+
+# Store a memory
+curl -X POST http://localhost:8765/api/v1/memories/ \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Steven uses an RTX 4090", "user_id": "steven"}'
+
+# Graph context
+curl "http://localhost:8765/api/v1/memories/graph/context/Steven?user_id=steven"
+```
+
+## How This Fork Differs from Upstream
+
+Upstream mem0 defaults to OpenAI for everything. This fork replaces all cloud dependencies with local Ollama equivalents.
+
+### Key Changes
+
+| Area | Upstream | This Fork |
+|------|----------|-----------|
+| LLM | OpenAI GPT-4 | Ollama (qwen3:4b-instruct) |
+| Embeddings | OpenAI ada-002 | Ollama (qwen3-embedding:0.6b) |
+| Config | Hardcoded OpenAI keys | Environment variables |
+| Categorization | OpenAI structured output | Ollama + manual JSON parsing |
+| Graph extraction | Assumes GPT-4 tool calling | Monkey-patched parser for qwen3 output formats |
+| Prompts | Verbose (for GPT-4) | Concise, directive (for 4B models) |
+| Memory search | Vector only | Hybrid: vector + graph + temporal |
+| Config source | Database only | config.json → DB → env vars (cascade) |
+| MCP tools | Basic | Enhanced (hybrid search, smart add, graph traversal) |
+
+### Files Added
+
+| File | Purpose |
+|------|---------|
+| `openmemory/docker-compose.override.yml` | Neo4j + Qdrant init + networking |
+| `openmemory/init-qdrant.sh` | Pre-create Qdrant collection (1024d cosine) |
+| `openmemory/api/app/utils/enhanced_memory.py` | Hybrid search + smart dedup |
+| `fix_graph_entity_parsing.py` | Qwen3 graph extraction parser |
+| `custom_update_prompt.py` | Optimized prompts for small models |
+| `mcp-server/server.js` | Standalone MCP server (4 tools, stdio transport) |
+| `mcp-server/SKILL.md` | Claude Code skill for auto-recall/capture behavior |
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `openmemory/api/app/utils/memory.py` | Ollama compatibility, env-based config, graph store |
+| `openmemory/api/app/utils/categorization.py` | OpenAI → Ollama |
+| `openmemory/api/app/mcp_server.py` | Enhanced memory manager |
+| `openmemory/api/app/routers/memories.py` | Graph queries, DELETE sync, no phantoms |
+| `openmemory/api/app/routers/config.py` | Env-based defaults, no auto-create DB rows |
+| `openmemory/api/app/database.py` | SQLite path fix for Docker volume persistence |
+| `openmemory/api/config.json` | Env var references for all providers |
+
+For the full technical changelog, see [FORK_CHANGES.md](FORK_CHANGES.md).
+
+## Data Persistence
+
+| Data | Storage | Docker Volume |
+|------|---------|---------------|
+| Vector embeddings | Qdrant | `qdrant-data` |
+| Knowledge graph | Neo4j | `neo4j-data` |
+| Memory metadata | SQLite | `openmemory-db` |
+
+All data survives container restarts and redeployments.
+
+## License
+
+Apache 2.0 — same as upstream. See [LICENSE](LICENSE).
+
+Based on [mem0ai/mem0](https://github.com/mem0ai/mem0) by the Mem0 team.
