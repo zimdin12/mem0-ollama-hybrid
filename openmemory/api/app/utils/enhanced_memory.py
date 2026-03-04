@@ -238,17 +238,29 @@ class EnhancedMemoryManager:
                     logging.warning(f"Failed to add fact '{fact[:50]}': {e}")
 
             # 6. Single graph extraction call with the FULL original text
-            #    This gives the graph LLM enough context to extract meaningful
-            #    entities and relationships (not fragments)
+            #    Runs in background thread — graph extraction is ~3s but non-critical
+            #    for the immediate response (vector results are already stored)
+            def _background_graph_extract(mem_client, full_text, uid):
+                try:
+                    graph_result = mem_client._add_to_graph(
+                        [{"role": "user", "content": full_text}],
+                        {"user_id": uid},
+                    )
+                    logging.info(f"Graph extraction completed: {graph_result}")
+                except Exception as e:
+                    logging.warning(f"Graph extraction failed (non-fatal): {e}")
+
             try:
                 if hasattr(self.memory_client, 'enable_graph') and self.memory_client.enable_graph:
-                    graph_result = self.memory_client._add_to_graph(
-                        [{"role": "user", "content": text}],
-                        {"user_id": user_id},
+                    import threading
+                    t = threading.Thread(
+                        target=_background_graph_extract,
+                        args=(self.memory_client, text, user_id),
+                        daemon=True,
                     )
-                    logging.info(f"Graph extraction from full text: {graph_result}")
+                    t.start()
             except Exception as e:
-                logging.warning(f"Graph extraction failed (non-fatal): {e}")
+                logging.warning(f"Graph extraction thread start failed: {e}")
 
             response = {'results': all_results}
 

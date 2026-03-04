@@ -149,7 +149,7 @@ async def search_memory(query: str) -> str:
             user, app = get_user_and_app(db, user_id=uid, app_id=client_name)
 
             # Perform hybrid search using enhanced memory manager
-            search_results = enhanced_memory_manager.hybrid_search(query, uid, limit=15)
+            search_results = enhanced_memory_manager.hybrid_search(query, uid, limit=10)
             
             # Filter results based on permissions
             user_memories = db.query(Memory).filter(Memory.user_id == user.id).all()
