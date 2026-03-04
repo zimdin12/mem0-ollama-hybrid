@@ -157,7 +157,8 @@ async def search_memory(query: str) -> str:
 
             filtered_results = []
             for result in search_results:
-                if result.id in accessible_memory_ids or not result.id:  # Allow results without IDs (from graph/temporal)
+                # Allow graph/temporal results (no SQLite entry) and accessible vector results
+                if result.source in ('graph', 'temporal') or result.id in accessible_memory_ids:
                     filtered_results.append({
                         "id": result.id,
                         "memory": result.content,
@@ -169,9 +170,9 @@ async def search_memory(query: str) -> str:
                         "updated_at": result.updated_at.isoformat() if result.updated_at and hasattr(result.updated_at, 'isoformat') else str(result.updated_at) if result.updated_at else None,
                     })
 
-            # Log access for memories with IDs
+            # Log access for vector memories with valid IDs
             for result in filtered_results:
-                if result.get("id"):
+                if result.get("id") and result.get("source") == "vector":
                     try:
                         access_log = MemoryAccessLog(
                             memory_id=uuid.UUID(result["id"]),
