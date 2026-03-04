@@ -85,44 +85,78 @@ open http://localhost:3000         # Memory UI
 
 ### Environment Variables
 
-All env vars are documented in `.env.example` files:
+There are **3 separate .env files** for different components:
 
-| File | Purpose |
-|------|---------|
-| `openmemory/api/.env.example` | API server — LLM, embedder, Qdrant, Neo4j config |
-| `openmemory/ui/.env.example` | UI dashboard — API URL and user ID |
-| `mcp-server/.env.example` | MCP server (host-side) — API URL and user ID |
+| File | What it configures | When to edit |
+|------|-------------------|--------------|
+| `openmemory/api/.env.example` | **API container** — LLM model, embedder, Qdrant, Neo4j, Ollama URL | Standalone deployment (not used when parent compose sets env vars) |
+| `openmemory/ui/.env.example` | **UI dashboard** — API URL and default user ID | Only if UI runs on a different host |
+| `mcp-server/.env.example` | **Host-side MCP server** (stdio transport) — API URL, user ID, app name | Only if using stdio MCP instead of SSE |
 
-Key variables for the API container:
+**When running inside a parent stack** (like OpenClaw), the parent's `docker-compose.yml` sets all env vars directly in the `environment:` section — the API `.env` file is NOT used. Edit `docker-compose.yml` instead.
+
+**When running standalone**, copy `openmemory/api/.env.example` to `.env` and edit it.
+
+#### API Environment Variables (the important ones)
 
 ```env
-# Ollama — where is it running?
-# host machine (Docker Desktop):  http://host.docker.internal:11434
-# Ollama in same compose stack:    http://ollama:11434
-# Remote machine:                  http://192.168.x.x:11434
-OLLAMA_BASE_URL=http://host.docker.internal:11434
+# === Ollama — where is it running? ===
+# Same Docker network:              http://ollama:11434
+# Host machine (Docker Desktop):    http://host.docker.internal:11434
+# Remote machine:                   http://192.168.x.x:11434
+OLLAMA_BASE_URL=http://ollama:11434
 
-# LLM (fact & entity extraction)
+# === LLM (fact & entity extraction) ===
 LLM_PROVIDER=ollama
-LLM_MODEL=qwen3:4b-instruct-2507-q4_K_M
+LLM_MODEL=qwen3:4b-instruct-2507-q4_K_M   # Any Ollama chat model works
 
-# Embeddings
+# === Embeddings ===
 EMBEDDER_PROVIDER=ollama
-EMBEDDER_MODEL=qwen3-embedding:0.6b
-EMBEDDER_OLLAMA_BASE_URL=http://host.docker.internal:11434
+EMBEDDER_MODEL=qwen3-embedding:0.6b         # Any Ollama embedding model works
+EMBEDDER_OLLAMA_BASE_URL=http://ollama:11434
 
-# Qdrant
+# === Vector Store (Qdrant) ===
 VECTOR_STORE_PROVIDER=qdrant
 QDRANT_HOST=mem0_store
 QDRANT_PORT=6333
 QDRANT_COLLECTION=openmemory
-QDRANT_EMBEDDING_DIMS=1024
+QDRANT_EMBEDDING_DIMS=1024                   # Must match embedding model output dims!
 
-# Neo4j
+# === Graph Store (Neo4j) ===
 NEO4J_URI=bolt://neo4j:7687
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=openmemory
 ```
+
+### Using Different Models
+
+Any Ollama model works as a drop-in replacement. The fork's compatibility layers handle
+all Ollama output formats automatically.
+
+**To change the extraction LLM** (affects fact/entity quality):
+```env
+LLM_MODEL=llama3.1:8b          # or glm4:9b, magistral:24b, etc.
+```
+Bigger models = better entity extraction quality but slower. The 4B sweet spot balances
+speed (~3s graph extraction) with quality (79+ entities from test data).
+
+**To change the embedding model** (affects search quality):
+```env
+EMBEDDER_MODEL=nomic-embed-text       # 768 dims
+QDRANT_EMBEDDING_DIMS=768             # MUST match!
+```
+**Warning**: Changing embedding model or dimensions requires:
+1. Wiping the Qdrant collection (old vectors are incompatible)
+2. Re-inserting all memories
+
+Common embedding models and their dimensions:
+
+| Model | Dims | Size | Notes |
+|-------|------|------|-------|
+| `qwen3-embedding:0.6b` (default) | 1024 | 639 MB | Best speed/quality for short facts |
+| `qwen3-embedding:4b` | 2560 (or 1024 via MRL) | 2.5 GB | Better on MTEB benchmarks but 5.7x slower |
+| `nomic-embed-text` | 768 | 274 MB | Older, lower quality |
+| `snowflake-arctic-embed2:568m` | 1024 | 1.2 GB | Good multilingual |
 
 ### Repository Structure
 
