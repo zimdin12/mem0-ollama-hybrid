@@ -5,6 +5,7 @@ Provides hybrid search, smart memory addition, and relationship analysis.
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
@@ -216,28 +217,44 @@ class EnhancedMemoryManager:
         # 4. Identify truly new facts
         novel_facts = self._find_novel_facts(new_facts, existing_facts, user_id=user_id)
         
-        # 5. Add only new information — add each fact individually to avoid
-        #    LLM re-extraction generating phantom facts from context
+        # 5. Add only new information
+        #    - Store each fact individually in vector store (infer=False, graph=False)
+        #    - Do ONE batched graph extraction with the full original text
         if novel_facts:
             all_results = []
             for fact in novel_facts:
                 try:
-                    # infer=False: skip LLM re-extraction since we already
-                    # extracted and deduped facts above
+                    # infer=False: skip LLM re-extraction
+                    # graph=False: skip graph extraction per-fact (we batch it below)
                     response = self.memory_client.add(
                         [{"role": "user", "content": fact}],
                         user_id=user_id,
                         metadata=metadata or {},
                         infer=False,
+                        graph=False,
                     )
                     all_results.extend(response.get('results', []))
                 except Exception as e:
                     logging.warning(f"Failed to add fact '{fact[:50]}': {e}")
+
+            # 6. Single graph extraction call with the FULL original text
+            #    This gives the graph LLM enough context to extract meaningful
+            #    entities and relationships (not fragments)
+            try:
+                if hasattr(self.memory_client, 'enable_graph') and self.memory_client.enable_graph:
+                    graph_result = self.memory_client._add_to_graph(
+                        [{"role": "user", "content": text}],
+                        {"user_id": user_id},
+                    )
+                    logging.info(f"Graph extraction from full text: {graph_result}")
+            except Exception as e:
+                logging.warning(f"Graph extraction failed (non-fatal): {e}")
+
             response = {'results': all_results}
-            
+
             status = "new" if not existing_memories else "updated"
             summary = f"Added {len(novel_facts)} new facts. Found {len(existing_facts)} existing related facts."
-            
+
             return MemoryAdditionResult(
                 added_memories=response.get('results', []) if response else [],
                 updated_memories=[],
@@ -356,12 +373,52 @@ class EnhancedMemoryManager:
         intersection = query_words.intersection(text_words)
         return len(intersection) / len(query_words)
     
+    # File extensions and version-like patterns that should NOT be treated as sentence endings
+    _EXTENSION_RE = re.compile(
+        r'\.'
+        r'(?:php|js|jsx|ts|tsx|py|json|yaml|yml|toml|xml|html|css|scss|md|txt|sh|bat|'
+        r'env|lock|sql|csv|log|conf|cfg|ini|vue|svelte|rb|rs|go|java|kt|swift|c|cpp|h|'
+        r'hpp|cs|fs|ex|exs|erl|hs|ml|r|jl|dart|lua|pl|pm|ipynb)'
+        r'(?=[\s,;:)\]}\-/"\']|$)',
+        re.IGNORECASE
+    )
+    _VERSION_RE = re.compile(r'(?:v?\d+)\.\d+(?:\.\d+)*(?:\+|-\w+)*')
+    _PATH_RE = re.compile(r'[\w/\\]+\.[\w]+')
+    _PLACEHOLDER = '\x00DOT\x00'
+
     def _extract_facts(self, text: str) -> List[str]:
-        """Extract factual statements from text"""
-        # Simple sentence splitting - could be enhanced with NLP
-        import re
-        sentences = re.split(r'[.!?]+', text)
-        facts = [s.strip() for s in sentences if s.strip() and len(s.strip()) > 10]
+        """Extract factual statements from text, protecting file extensions and versions."""
+        # 1. Protect file extensions, version numbers, and paths from sentence splitting
+        protected = text
+        replacements = []
+
+        # Protect version numbers first (e.g., "v3.3", "PHP 8.2+", "1.17.0")
+        for m in self._VERSION_RE.finditer(protected):
+            replacements.append(m.group())
+        for r in replacements:
+            protected = protected.replace(r, r.replace('.', self._PLACEHOLDER))
+
+        # Protect file extensions (e.g., ".php", ".js")
+        protected = self._EXTENSION_RE.sub(
+            lambda m: m.group().replace('.', self._PLACEHOLDER), protected
+        )
+
+        # 2. Split on actual sentence boundaries
+        sentences = re.split(r'(?<=[.!?])\s+', protected)
+
+        # 3. Restore protected dots and validate
+        facts = []
+        for s in sentences:
+            restored = s.replace(self._PLACEHOLDER, '.').strip()
+            # Strip trailing punctuation for cleaner facts
+            restored = restored.rstrip('.!? ')
+            if not restored or len(restored) < 20:
+                continue
+            # Reject fragments starting with orphaned extensions/lowercase
+            if re.match(r'^[a-z]{1,4}[)\]\s,]', restored):
+                continue
+            facts.append(restored)
+
         return facts
     
     def _find_novel_facts(self, new_facts: List[str], existing_facts: List[str], user_id: str = None) -> List[str]:

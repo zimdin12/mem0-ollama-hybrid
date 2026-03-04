@@ -720,15 +720,12 @@ def get_memory_client(custom_instructions: str = None):
                 config["custom_update_memory_prompt"] = get_qwen3_update_prompt()
                 print("✓ Loaded custom update memory prompt optimized for qwen3:4b")
 
-            # TEMPORARY: Disable custom graph prompt to test
-            # The custom_prompt changes how mem0 sends the entity list to the LLM
-            # When custom_prompt is set, it doesn't include "List of entities: ..." in user message
-            # This breaks qwen3:4b's relationship extraction
-            # TODO: Fix this by modifying the prompt or the code
-            # if "graph_store" in config:
-            #     if "custom_prompt" not in config["graph_store"] or config["graph_store"].get("custom_prompt") is None:
-            #         config["graph_store"]["custom_prompt"] = get_qwen3_graph_relationship_prompt()
-            #         print("✓ Loaded custom graph relationship prompt optimized for qwen3:4b")
+            # Enable custom graph prompt — the entity list bug is now fixed in graph_memory.py
+            # (entity list is always included in user message regardless of custom_prompt)
+            if "graph_store" in config:
+                if "custom_prompt" not in config["graph_store"] or config["graph_store"].get("custom_prompt") is None:
+                    config["graph_store"]["custom_prompt"] = get_qwen3_graph_relationship_prompt()
+                    print("✓ Loaded custom graph relationship prompt optimized for qwen3:4b")
 
         except ImportError as e:
             print(f"Warning: Could not load custom prompts: {e}")

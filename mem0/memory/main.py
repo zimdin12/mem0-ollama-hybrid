@@ -289,6 +289,7 @@ class Memory(MemoryBase):
         infer: bool = True,
         memory_type: Optional[str] = None,
         prompt: Optional[str] = None,
+        graph: bool = True,
     ):
         """
         Create a new memory.
@@ -368,12 +369,13 @@ class Memory(MemoryBase):
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future1 = executor.submit(self._add_to_vector_store, messages, processed_metadata, effective_filters, infer)
-            future2 = executor.submit(self._add_to_graph, messages, effective_filters)
+            if graph:
+                future2 = executor.submit(self._add_to_graph, messages, effective_filters)
 
-            concurrent.futures.wait([future1, future2])
+            concurrent.futures.wait([future1] + ([future2] if graph else []))
 
             vector_store_result = future1.result()
-            graph_result = future2.result()
+            graph_result = future2.result() if graph else []
 
         if self.enable_graph:
             return {

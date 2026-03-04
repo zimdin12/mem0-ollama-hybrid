@@ -202,7 +202,7 @@ class MemoryGraph:
             messages=[
                 {
                     "role": "system",
-                    "content": f"You are a smart assistant who understands entities and their types in a given text. If user message contains self reference such as 'I', 'me', 'my' etc. then use {filters['user_id']} as the source entity. Extract all the entities from the text. ***DO NOT*** answer the question itself if the given text is a question.",
+                    "content": f"You are a smart assistant who understands entities and their types in a given text. If user message contains self reference such as 'I', 'me', 'my' etc. then use {filters['user_id']} as the source entity. Extract all the entities from the text. ***DO NOT*** answer the question itself if the given text is a question.\n\nENTITY TYPE RULES FOR CODE/TECH CONTEXT:\n- Class/interface names (e.g. BlockTranslationService, BlogPost) → type: \"class\"\n- File paths (e.g. app/Services/Foo.php, config/blocks.php) → type: \"file\"\n- Frameworks/libraries (e.g. Laravel, Filament, React) → type: \"framework\"\n- Projects/applications (e.g. blei-cms, OpenClaw) → type: \"project\"\n- Programming languages (e.g. PHP, Python, JavaScript) → type: \"language\"\n- Database tables (e.g. block_translations, blog_posts) → type: \"table\"\n- File extensions alone (.php, .js, .py) are NOT entities — skip them\n- Generic words (utilities, default, record) are NOT entities unless they name something specific",
                 },
                 {"role": "user", "content": data},
             ],
@@ -236,20 +236,16 @@ class MemoryGraph:
         if filters.get("run_id"):
             user_identity += f", run_id: {filters['run_id']}"
 
+        system_content = EXTRACT_RELATIONS_PROMPT.replace("USER_ID", user_identity)
         if self.config.graph_store.custom_prompt:
-            system_content = EXTRACT_RELATIONS_PROMPT.replace("USER_ID", user_identity)
-            # Add the custom prompt line if configured
             system_content = system_content.replace("CUSTOM_PROMPT", f"4. {self.config.graph_store.custom_prompt}")
-            messages = [
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": data},
-            ]
         else:
-            system_content = EXTRACT_RELATIONS_PROMPT.replace("USER_ID", user_identity)
-            messages = [
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": f"List of entities: {list(entity_type_map.keys())}. \n\nText: {data}"},
-            ]
+            system_content = system_content.replace("CUSTOM_PROMPT", "")
+        # Always include entity list so the LLM knows which entities to relate
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": f"List of entities: {list(entity_type_map.keys())}. \n\nText: {data}"},
+        ]
 
         _tools = [RELATIONS_TOOL]
         if self.llm_provider in ["azure_openai_structured", "openai_structured"]:

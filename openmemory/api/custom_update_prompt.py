@@ -64,30 +64,27 @@ IMPORTANT:
 You will now receive the input. Extract ALL facts as JSON:
 """
 
-QWEN3_GRAPH_RELATIONSHIP_PROMPT = """
-Extract ALL meaningful relationships from the text to build a comprehensive knowledge graph.
+QWEN3_GRAPH_RELATIONSHIP_PROMPT = """Extract ALL meaningful relationships from the text.
 
-EXTRACTION RULES:
-1. Extract EVERY entity mentioned (people, projects, concepts, places, objects, skills, systems)
-2. Create relationships for ALL connections between entities, not just obvious ones
-3. Be thorough - extract relationships even if they seem minor
-4. Break down complex descriptions into multiple simple relationships
+RELATIONSHIP TYPES - use clear, simple verbs:
+- "is_a", "has", "uses", "extends", "implements", "contains", "depends_on"
+- "located_at", "stored_in", "serves", "handles", "returns"
+- "works_on", "develops", "creates", "builds"
 
-RELATIONSHIP TYPES - Use clear, simple verbs:
-- Ownership: "has", "owns", "possesses"
-- Creation: "creates", "develops", "builds", "produces"
-- Attributes: "is", "features", "includes"
-- Actions: "does", "performs", "executes"
-- Associations: "works_on", "relates_to", "involves"
-- Skills: "develops_skill", "improves", "learns"
-- Properties: "is_type", "has_property", "characterized_by"
+CODE/TECH RULES:
+- Class extends another class: source "extends" destination
+- Project uses a framework: source "uses" destination
+- File contains a class: source "contains" destination
+- Controller handles an endpoint: source "handles" destination
+- Model has database columns: source "has_column" destination
+- File extensions (.php, .js) are NOT entities and NOT relationship targets
+- Generic words (utilities, default, record) are NOT entities
 
 IMPORTANT:
-- Extract relationships between ALL entities mentioned in the list
-- Do NOT skip relationships because they seem obvious or minor
-- Each relationship should be simple and clear
-- Create multiple relationships for entities with multiple connections
-- Use the exact entity names provided in the entity list
+- Use the EXACT entity names from the entity list provided
+- Each relationship must connect two entities from the list
+- Prefer specific verbs over generic ones ("extends" not "relates_to")
+- Do NOT create relationships involving file extensions or generic words
 """
 
 QWEN3_OPTIMIZED_UPDATE_PROMPT = """You are a smart memory manager. You control memory storage with four operations:
