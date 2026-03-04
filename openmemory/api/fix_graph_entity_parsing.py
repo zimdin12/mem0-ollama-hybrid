@@ -1,228 +1,223 @@
 """
-Monkey-patch for mem0's graph entity extraction to fix qwen3:4b output parsing.
+JSON-based graph extraction for qwen3:4b (replaces unreliable tool calling).
 
-Problem: qwen3:4b includes helpful parenthetical notes in entity extraction:
-  {"entity": "Steven (source entity", "entity_type": "steven_debug_test)"}
+Problem: qwen3:4b cannot reliably use Ollama's tool/function calling format.
+Entity extraction returns empty tool_calls, relationship extraction fails.
 
-This breaks the entity names when mem0 processes them. This patch cleans
-the entity names by removing everything after "(" in both entity and entity_type.
+Solution: Use Ollama's `format: 'json'` mode with a single prompt that extracts
+both entities and relationships in one call. This is:
+- More reliable (JSON mode forces valid JSON output)
+- Faster (1 LLM call instead of 3-4)
+- Higher quality (LLM sees full context for both entities and relationships)
 """
 
+import json
 import re
 import logging
 from mem0.memory.graph_memory import MemoryGraph
-from mem0.graphs.tools import EXTRACT_ENTITIES_TOOL, EXTRACT_ENTITIES_STRUCT_TOOL
 
 logger = logging.getLogger(__name__)
 
-# Save original method
+# Save originals for potential restore
+_original_add = MemoryGraph.add
 _original_retrieve_nodes = MemoryGraph._retrieve_nodes_from_data
+_original_establish_relations = MemoryGraph._establish_nodes_relations_from_data
+
+# Entities that should NOT be in the graph (file extensions, generic words)
+_ENTITY_BLOCKLIST = frozenset([
+    'php', 'js', 'jsx', 'ts', 'tsx', 'py', 'json', 'yaml', 'yml', 'css', 'html',
+    'xml', 'md', 'txt', 'sh', 'bat', 'sql', 'csv', 'log', 'conf', 'cfg', 'ini',
+    'utilities', 'default', 'record', 'entity', 'unknown', 'other', 'none', 'null',
+    'true', 'false', 'yes', 'no', 'n/a', 'etc', 'i.e', 'e.g',
+])
+
+GRAPH_EXTRACTION_PROMPT = """Extract entities and relationships from text. Return ONLY a JSON object.
+
+Output format:
+{"entities": [{"name": "...", "type": "..."}, ...], "relationships": [{"source": "...", "relation": "...", "target": "..."}, ...]}
+
+Entity types to use:
+- person (people, users, characters)
+- project (applications, games, products being built)
+- technology (languages, engines, protocols, libraries)
+- framework (specific frameworks like Laravel, React, UE5)
+- tool (software tools: MagicaVoxel, Blender, VS Code)
+- concept (game mechanics, design patterns, abstract ideas)
+- skill (abilities, competencies)
+- place (locations, environments, biomes)
+- organization (companies, teams)
+- phase (development phases, milestones, time periods)
+
+Rules:
+- Keep entity names concise (2-4 words max)
+- Use lowercase for entity names
+- Do NOT create entities from file extensions (.php, .js, .py)
+- Do NOT create entities from generic words (utilities, default, record)
+- Every relationship must connect two entities that appear in the entities list
+- For self-references (I, me, my), use "USER_ID" as the entity name
+- Prefer specific relation verbs: uses, extends, contains, develops, creates, features, has, is_a, located_in, part_of, made_by, inspired_by"""
+
+
+def _json_extract_graph(self, data, filters):
+    """
+    Extract entities and relationships using JSON mode (single LLM call).
+    Returns (entity_type_map, relationships).
+    """
+    user_id = filters.get('user_id', 'user')
+    prompt = GRAPH_EXTRACTION_PROMPT.replace("USER_ID", user_id)
+
+    try:
+        # Use Ollama's JSON mode directly
+        import requests
+        import os
+
+        ollama_url = os.environ.get('OLLAMA_BASE_URL', 'http://ollama:11434')
+        model = os.environ.get('LLM_MODEL', 'qwen3:4b-instruct-2507-q4_K_M')
+
+        resp = requests.post(f'{ollama_url}/api/chat', json={
+            'model': model,
+            'messages': [
+                {'role': 'system', 'content': prompt},
+                {'role': 'user', 'content': data},
+            ],
+            'stream': False,
+            'format': 'json',
+        }, timeout=120)
+
+        if resp.status_code != 200:
+            logger.warning(f"Graph JSON extraction failed: HTTP {resp.status_code}")
+            return {}, []
+
+        raw_resp = resp.json()
+        if not isinstance(raw_resp, dict):
+            logger.warning(f"Graph JSON extraction: unexpected response type {type(raw_resp)}")
+            return {}, []
+        msg = raw_resp.get('message', {})
+        if isinstance(msg, str):
+            content = msg
+        elif isinstance(msg, dict):
+            content = msg.get('content', '')
+        else:
+            content = ''
+        if not content:
+            logger.warning("Graph JSON extraction returned empty content")
+            return {}, []
+
+        parsed = json.loads(content)
+
+        # Build entity_type_map
+        entity_type_map = {}
+        raw_entities = parsed.get('entities', [])
+        for ent in raw_entities:
+            if isinstance(ent, str):
+                name = ent.strip()
+                etype = 'concept'
+            elif isinstance(ent, dict):
+                name = ent.get('name', '').strip()
+                etype = ent.get('type', 'concept').strip()
+            else:
+                continue
+            if not name:
+                continue
+            # Normalize
+            name_key = name.lower().replace(' ', '_')
+            etype_key = etype.lower().replace(' ', '_')
+            # Filter blocked entities
+            if name_key in _ENTITY_BLOCKLIST:
+                continue
+            if len(name_key) < 2:
+                continue
+            entity_type_map[name_key] = etype_key
+
+        # Build relationships list
+        relationships = []
+        raw_rels = parsed.get('relationships', [])
+        for rel in raw_rels:
+            if not isinstance(rel, dict):
+                continue
+            source = str(rel.get('source', '')).strip().lower().replace(' ', '_')
+            target = str(rel.get('target', '')).strip().lower().replace(' ', '_')
+            relation = str(rel.get('relation', '')).strip().lower().replace(' ', '_')
+
+            if not source or not target or not relation:
+                continue
+            # Skip self-references
+            if source == target:
+                continue
+            # Skip blocked entities
+            if source in _ENTITY_BLOCKLIST or target in _ENTITY_BLOCKLIST:
+                continue
+            # Ensure both entities are in the map (add if missing)
+            if source not in entity_type_map:
+                entity_type_map[source] = 'concept'
+            if target not in entity_type_map:
+                entity_type_map[target] = 'concept'
+
+            relationships.append({
+                'source': source,
+                'relationship': relation,
+                'destination': target,
+            })
+
+        logger.info(f"Graph JSON extraction: {len(entity_type_map)} entities, {len(relationships)} relationships")
+        return entity_type_map, relationships
+
+    except json.JSONDecodeError as e:
+        logger.warning(f"Graph JSON parse error: {e}")
+        return {}, []
+    except Exception as e:
+        logger.warning(f"Graph JSON extraction error: {e}")
+        return {}, []
+
+
+def _patched_add(self, data, filters):
+    """
+    Replacement for MemoryGraph.add() that uses JSON extraction.
+    Skips the unreliable tool-calling-based pipeline entirely.
+    """
+    # Step 1: Extract entities and relationships in one JSON call
+    entity_type_map, to_be_added = _json_extract_graph(self, data, filters)
+
+    if not entity_type_map and not to_be_added:
+        logger.info("Graph extraction returned nothing, skipping graph update")
+        return {"deleted_entities": [], "added_entities": []}
+
+    # Step 2: Search for existing similar nodes (uses embeddings, no LLM)
+    search_output = self._search_graph_db(
+        node_list=list(entity_type_map.keys()), filters=filters
+    )
+
+    # Step 3: Skip deletion step (unreliable with small LLMs, and risky)
+    # The old pipeline used an LLM call to decide what to delete — too error-prone.
+    # We only add/update, never delete from graph via extraction.
+
+    # Step 4: Add entities and relationships to Neo4j
+    added_entities = self._add_entities(to_be_added, filters, entity_type_map)
+
+    return {"deleted_entities": [], "added_entities": added_entities}
 
 
 def _patched_retrieve_nodes(self, data, filters):
-    """
-    Patched version that cleans qwen3:4b's parenthetical notes from entities.
-    """
-    # Use mem0's tools
-    _tools = [EXTRACT_ENTITIES_TOOL]
-    if self.llm_provider in ["azure_openai_structured", "openai_structured"]:
-        _tools = [EXTRACT_ENTITIES_STRUCT_TOOL]
-
-    # Enhanced prompt for qwen3:4b - forces tool calling with clear structure
-    system_prompt = f"""You are a precise entity extraction system. Your task is to identify ALL entities and their types from the provided text.
-
-CRITICAL INSTRUCTIONS:
-1. You MUST use the extract_entities function call - do NOT write explanatory text
-2. Extract EVERY entity mentioned in the text, no matter how many
-3. For self-references ('I', 'me', 'my'), use '{filters['user_id']}' as the entity name
-4. Keep entity names concise - use the actual name, not descriptions
-5. Choose specific entity types: person, organization, place, product, concept, skill, etc.
-
-FORMAT: Use the extract_entities function with an array of {{"entity": "name", "entity_type": "type"}} objects.
-
-DO NOT provide explanations or descriptions - only call the function."""
-
-    search_results = self.llm.generate_response(
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Extract all entities from this text:\n\n{data}"},
-        ],
-        tools=_tools,
-    )
-
-    entity_type_map = {}
-
-    try:
-        for tool_call in search_results.get("tool_calls", []):
-            if tool_call["name"] != "extract_entities":
-                continue
-            for item in tool_call["arguments"]["entities"]:
-                # Handle mixed formats: qwen3:4b sometimes returns strings instead of dicts
-                if isinstance(item, str):
-                    entity = item.strip()
-                    entity_type = 'entity'
-                elif isinstance(item, dict):
-                    entity_raw = item.get("entity", "")
-                    entity_type_raw = item.get("entity_type", "entity")
-
-                    # Clean entity name: remove parentheses, arrows, and "entity type" suffix
-                    entity = re.sub(r'\s*\(.*', '', entity_raw).strip()
-                    entity = re.sub(r'\s*→.*', '', entity).strip()
-
-                    # Clean entity_type: remove parentheses, arrows, and quotes
-                    entity_type = re.sub(r'\).*', '', entity_type_raw)
-                    entity_type = re.sub(r'\s*\(.*', '', entity_type)
-                    entity_type = re.sub(r'\s*→.*', '', entity_type)
-                    entity_type = entity_type.strip().strip('"\'')
-
-                    # Additional cleaning: take only the base type before comma or "due"
-                    if ',' in entity_type:
-                        entity_type = entity_type.split(',')[0].strip()
-                    if '_due_to' in entity_type:
-                        entity_type = entity_type.split('_due_to')[0].strip()
-                    if ' due' in entity_type:
-                        entity_type = entity_type.split(' due')[0].strip()
-
-                    # If entity_type looks like a user_id, default to reasonable type
-                    if len(entity_type) > 20 or '_test' in entity_type or entity_type == entity.replace(' ', '_'):
-                        entity_type = 'entity'
-                else:
-                    continue
-
-                if entity and entity_type:
-                    entity_type_map[entity] = entity_type
-
-    except Exception as e:
-        logger.exception(
-            f"Error in search tool: {e}, llm_provider={self.llm_provider}, search_results={search_results}"
-        )
-
-    # Apply mem0's standard cleanup
-    entity_type_map = {k.lower().replace(" ", "_"): v.lower().replace(" ", "_") for k, v in entity_type_map.items()}
-
-    logger.debug(f"Entity type map (after qwen3 cleaning): {entity_type_map}\n search_results={search_results}")
-
-    return entity_type_map
-
-
-def _match_to_entity_map(name, entity_type_map_keys):
-    """
-    Match a relationship entity name to the closest key in entity_type_map.
-
-    The LLM may return names like "Whiskers the cat" while entity_type_map has
-    "whiskers". After _remove_spaces_from_entities normalizes to "whiskers_the_cat",
-    the lookup fails. This function tries:
-      1. Exact match
-      2. A map key that is a prefix of the name (e.g. "whiskers" matches "whiskers_the_cat")
-      3. The name is a prefix of a map key
-    Returns the matched key, or the original name if no match found.
-    """
-    if name in entity_type_map_keys:
-        return name
-
-    # Try: map key is a prefix of the name (longest prefix wins)
-    prefix_matches = [k for k in entity_type_map_keys if name.startswith(k)]
-    if prefix_matches:
-        return max(prefix_matches, key=len)
-
-    # Try: name is a prefix of a map key
-    prefix_matches = [k for k in entity_type_map_keys if k.startswith(name)]
-    if prefix_matches:
-        return max(prefix_matches, key=len)
-
-    # Try: either contains the other (substring match, longest wins)
-    substring_matches = [k for k in entity_type_map_keys if k in name or name in k]
-    if substring_matches:
-        return max(substring_matches, key=len)
-
-    return name
+    """Stub — extraction happens in _patched_add via JSON."""
+    return {}
 
 
 def _patched_establish_relations(self, data, filters, entity_type_map):
-    """
-    Patched version with improved prompt for qwen3:4b relationship extraction.
-    Includes fuzzy entity matching and self-reference filtering.
-    """
-    from mem0.graphs.tools import RELATIONS_TOOL, RELATIONS_STRUCT_TOOL
-
-    user_identity = f"user_id: {filters['user_id']}"
-    if filters.get("agent_id"):
-        user_identity += f", agent_id: {filters['agent_id']}"
-    if filters.get("run_id"):
-        user_identity += f", run_id: {filters['run_id']}"
-
-    system_prompt = f"""You are a precise relationship extraction system. Your task is to identify ALL relationships between the provided entities.
-
-CRITICAL INSTRUCTIONS:
-1. You MUST use the establish_relationships function call - do NOT write explanatory text
-2. Extract EVERY relationship you can find between the entities
-3. For self-references ('I', 'me', 'my'), use '{user_identity}' as the source entity
-4. Use concise relationship names: has, is_a, works_on, located_in, part_of, etc.
-5. Only create relationships between entities that are actually connected in the text
-
-FORMAT: Use the establish_relationships function with an array of {{"source": "entity1", "relationship": "rel_type", "destination": "entity2"}} objects.
-
-DO NOT provide explanations or descriptions - only call the function with the relationships."""
-
-    entity_list = list(entity_type_map.keys())
-    user_content = f"Entities to connect: {entity_list}\n\nText: {data}"
-
-    _tools = [RELATIONS_TOOL]
-    if self.llm_provider in ["azure_openai_structured", "openai_structured"]:
-        _tools = [RELATIONS_STRUCT_TOOL]
-
-    extracted_entities = self.llm.generate_response(
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        tools=_tools,
-    )
-
-    entities = []
-    if extracted_entities.get("tool_calls"):
-        entities = extracted_entities["tool_calls"][0].get("arguments", {}).get("entities", [])
-
-    # Apply mem0's standard normalization (lowercase + underscore)
-    entities = self._remove_spaces_from_entities(entities)
-
-    # Normalize source/destination to match entity_type_map keys via fuzzy matching
-    map_keys = set(entity_type_map.keys())
-    normalized_entities = []
-    for item in entities:
-        src = _match_to_entity_map(item["source"], map_keys)
-        dst = _match_to_entity_map(item["destination"], map_keys)
-
-        if src != item["source"] or dst != item["destination"]:
-            logger.debug(f"Entity remap: ({item['source']} -> {src}), ({item['destination']} -> {dst})")
-
-        # Filter out self-referencing edges
-        if src == dst:
-            logger.debug(f"Filtered self-reference: {src} -[{item['relationship']}]-> {dst}")
-            continue
-
-        # Clean verbose relationship names (e.g. "has_a_pet_named" -> "has_pet")
-        rel = item["relationship"]
-        rel = re.sub(r'_a_|_an_|_the_', '_', rel)
-        rel = re.sub(r'_named$|_called$', '', rel)
-
-        item["source"] = src
-        item["destination"] = dst
-        item["relationship"] = rel
-        normalized_entities.append(item)
-
-    logger.debug(f"Extracted entities (after normalization): {normalized_entities}")
-    return normalized_entities
+    """Stub — extraction happens in _patched_add via JSON."""
+    return []
 
 
 def apply_patch():
-    """Apply the monkey patch to fix qwen3:4b entity parsing."""
+    """Apply JSON-based graph extraction patch for qwen3:4b."""
+    MemoryGraph.add = _patched_add
     MemoryGraph._retrieve_nodes_from_data = _patched_retrieve_nodes
     MemoryGraph._establish_nodes_relations_from_data = _patched_establish_relations
     print("✓ Applied qwen3:4b entity and relationship extraction fixes for graph extraction")
 
 
 def remove_patch():
-    """Remove the monkey patch and restore original behavior."""
+    """Remove the patch and restore original behavior."""
+    MemoryGraph.add = _original_add
     MemoryGraph._retrieve_nodes_from_data = _original_retrieve_nodes
-    print("✓ Removed qwen3:4b entity parsing patch")
+    MemoryGraph._establish_nodes_relations_from_data = _original_establish_relations
+    print("✓ Removed qwen3:4b graph extraction patch")

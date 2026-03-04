@@ -319,11 +319,23 @@ class EnhancedMemoryManager:
     
     def _extract_entities_from_query(self, query: str) -> List[str]:
         """Extract potential entities from search query"""
-        # Simple implementation - could be enhanced with NER
-        words = query.lower().split()
-        # Filter out common words, keep potential entities
-        entities = [w for w in words if len(w) > 2 and w not in ['the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had', 'her', 'was', 'one', 'our', 'out', 'day', 'get', 'has', 'him', 'his', 'how', 'its', 'may', 'new', 'now', 'old', 'see', 'two', 'who', 'boy', 'did', 'she', 'use', 'way', 'who']]
-        return entities[:5]  # Limit to avoid too many queries
+        import re as _re
+        # Strip punctuation, lowercase, split
+        cleaned = _re.sub(r'[^\w\s]', '', query.lower())
+        words = cleaned.split()
+        # Filter out common/stop words, keep potential entities
+        stopwords = frozenset([
+            'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had',
+            'her', 'was', 'one', 'our', 'out', 'day', 'get', 'has', 'him', 'his',
+            'how', 'its', 'may', 'new', 'now', 'old', 'see', 'two', 'who', 'boy',
+            'did', 'she', 'use', 'way', 'what', 'does', 'this', 'that', 'with',
+            'from', 'have', 'been', 'will', 'would', 'could', 'should', 'there',
+            'their', 'them', 'they', 'then', 'than', 'when', 'where', 'which',
+            'about', 'into', 'some', 'also', 'just', 'more', 'very', 'much',
+            'work', 'used', 'main', 'exist',
+        ])
+        entities = [w for w in words if len(w) > 2 and w not in stopwords]
+        return entities[:5]
     
     def _find_related_entities(self, entity: str, user_id: str) -> List[Dict]:
         """Find entities related to given entity in Neo4j graph"""
@@ -342,18 +354,23 @@ class EnhancedMemoryManager:
                 return results
 
             query = """
-            MATCH (n)-[r]-(m)
-            WHERE toLower(n.name) CONTAINS toLower($entity)
+            MATCH (n)-[r]->(m)
+            WHERE (toLower(n.name) CONTAINS toLower($entity)
+                   OR toLower(m.name) CONTAINS toLower($entity))
+            AND n.name <> m.name
             RETURN n.name AS source, type(r) AS relationship, m.name AS target
-            LIMIT 10
+            LIMIT 5
             """
             with driver.session() as session:
                 records = session.run(query, entity=entity)
                 for record in records:
-                    content = f"{record['source']} {record['relationship']} {record['target']}"
+                    src = record['source'].replace('_', ' ')
+                    rel = record['relationship'].replace('_', ' ')
+                    tgt = record['target'].replace('_', ' ')
+                    content = f"{src} {rel} {tgt}"
                     results.append({
                         'content': content,
-                        'relevance': 0.8,
+                        'relevance': 0.65,
                         'relationships': [
                             {'source': record['source'], 'rel': record['relationship'], 'target': record['target']}
                         ]
@@ -493,20 +510,47 @@ class EnhancedMemoryManager:
         return patterns
     
     def _deduplicate_and_rank(self, results: List[MemorySearchResult], limit: int) -> List[MemorySearchResult]:
-        """Remove duplicates and rank by combined relevance"""
-        # Simple deduplication by ID
+        """Remove duplicates, interleave sources, and rank by relevance."""
+        # Deduplication by ID and content
         seen_ids = set()
+        seen_content = set()
         unique_results = []
-        
+
         for result in results:
-            if result.id not in seen_ids:
+            content_key = result.content.lower().strip()[:60]
+            if result.id not in seen_ids and content_key not in seen_content:
                 seen_ids.add(result.id)
+                seen_content.add(content_key)
                 unique_results.append(result)
-        
-        # Sort by score (descending)
-        unique_results.sort(key=lambda x: x.score, reverse=True)
-        
-        return unique_results[:limit]
+
+        # Sort by score within each source
+        vector_results = sorted([r for r in unique_results if r.source == 'vector'],
+                                key=lambda x: x.score, reverse=True)
+        graph_results = sorted([r for r in unique_results if r.source == 'graph'],
+                               key=lambda x: x.score, reverse=True)
+        temporal_results = sorted([r for r in unique_results if r.source == 'temporal'],
+                                  key=lambda x: x.score, reverse=True)
+
+        # Interleave: prioritize vector (most informative), then graph, then temporal
+        # Take up to 60% vector, 30% graph, 10% temporal
+        max_vector = max(1, int(limit * 0.6))
+        max_graph = max(1, int(limit * 0.3))
+        max_temporal = max(1, int(limit * 0.1))
+
+        merged = []
+        merged.extend(vector_results[:max_vector])
+        merged.extend(graph_results[:max_graph])
+        merged.extend(temporal_results[:max_temporal])
+
+        # If we haven't hit the limit, fill with remaining results
+        remaining = [r for r in unique_results if r not in merged]
+        remaining.sort(key=lambda x: x.score, reverse=True)
+        merged.extend(remaining[:limit - len(merged)])
+
+        # Final sort by score
+        merged.sort(key=lambda x: x.score, reverse=True)
+
+        return merged[:limit]
 
 
 # Global instance
