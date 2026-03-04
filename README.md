@@ -154,6 +154,122 @@ mem0-fork/
 
 ## Connecting Clients
 
+There are two ways to connect MCP clients to OpenMemory:
+
+| Method | Transport | Requires | Best for |
+|--------|-----------|----------|----------|
+| **SSE** (recommended) | HTTP to API container | Nothing extra | Any MCP client — no Node.js needed |
+| **Stdio** | Node.js process on host | `npm install` in `mcp-server/` | Claude Code / OpenCode if SSE isn't supported |
+
+### SSE Endpoint (recommended)
+
+The OpenMemory API has a **built-in MCP server** at:
+
+```
+http://<host>:8765/mcp/<client_name>/sse/<user_id>
+```
+
+Replace `<host>` with your machine's IP or `localhost`, `<client_name>` with any label, and `<user_id>` with your user ID.
+
+**Claude Code:**
+
+```bash
+claude mcp add openmemory --transport sse http://localhost:8765/mcp/claude-code/sse/steven
+```
+
+Or add to `~/.claude.json` (global) or `.mcp.json` (per-project):
+
+```json
+{
+  "mcpServers": {
+    "openmemory": {
+      "type": "sse",
+      "url": "http://localhost:8765/mcp/claude-code/sse/steven"
+    }
+  }
+}
+```
+
+**OpenCode:**
+
+```json
+{
+  "openmemory": {
+    "type": "sse",
+    "url": "http://localhost:8765/mcp/opencode/sse/steven"
+  }
+}
+```
+
+**Any MCP client (generic SSE config):**
+
+```json
+{
+  "type": "sse",
+  "url": "http://192.168.x.x:8765/mcp/my-client/sse/steven"
+}
+```
+
+### Stdio (Node.js MCP server)
+
+Alternative if your client doesn't support SSE. Runs `mcp-server/server.js` on the host machine as a subprocess.
+
+```bash
+cd mcp-server && npm install
+```
+
+**Claude Code:**
+
+```bash
+claude mcp add openmemory -- node /path/to/mcp-server/server.js
+```
+
+Or in config:
+
+```json
+{
+  "mcpServers": {
+    "openmemory": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/path/to/mcp-server/server.js"],
+      "env": {
+        "MEMORY_API_URL": "http://localhost:8765",
+        "MEMORY_USER_ID": "steven"
+      }
+    }
+  }
+}
+```
+
+See `mcp-server/.env.example` for all env vars.
+
+**OpenCode:**
+
+```json
+{
+  "openmemory": {
+    "type": "stdio",
+    "command": "node",
+    "args": ["/path/to/mcp-server/server.js"],
+    "env": {
+      "MEMORY_API_URL": "http://localhost:8765",
+      "MEMORY_USER_ID": "steven"
+    }
+  }
+}
+```
+
+### Claude Code Skill (optional, works with either transport)
+
+The skill tells Claude *when* to use memory tools (auto-recall, auto-capture). It complements the MCP server — doesn't replace it.
+
+```bash
+claude skill add /path/to/mcp-server/SKILL.md
+```
+
+Or copy `SKILL.md` into your project's `.claude/skills/` directory.
+
 ### OpenClaw
 
 Uses the bundled plugin at `config/extensions/openmemory/`. Config in `openclaw.json`:
@@ -173,75 +289,6 @@ Uses the bundled plugin at `config/extensions/openmemory/`. Config in `openclaw.
   }
 }
 ```
-
-### Claude Code
-
-Two parts: **MCP server** (provides 4 memory tools) and **Skill** (tells Claude when/how to use them).
-
-```bash
-cd mcp-server && npm install
-```
-
-**1. Register MCP server** (one of these methods):
-
-CLI:
-```bash
-claude mcp add openmemory -- node /path/to/mcp-server/server.js
-```
-
-Or add to `~/.claude.json` (global) or `.mcp.json` (per-project):
-```json
-{
-  "mcpServers": {
-    "openmemory": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["/path/to/mcp-server/server.js"],
-      "env": {
-        "MEMORY_API_URL": "http://localhost:8765",
-        "MEMORY_USER_ID": "steven"
-      }
-    }
-  }
-}
-```
-
-**2. Install skill** (one of these methods):
-
-CLI:
-```bash
-claude skill add /path/to/mcp-server/SKILL.md
-```
-
-Or copy `SKILL.md` into your project's `.claude/skills/` directory.
-
-The skill adds auto-recall at conversation start, auto-capture of durable facts, and guidelines for writing good memories. It requires the MCP server to be registered (the skill references the MCP tools).
-
-### OpenCode (MCP only)
-
-Add to your OpenCode MCP config:
-
-```json
-{
-  "openmemory": {
-    "type": "stdio",
-    "command": "node",
-    "args": ["/path/to/mcp-server/server.js"],
-    "env": {
-      "MEMORY_API_URL": "http://localhost:8765",
-      "MEMORY_USER_ID": "steven"
-    }
-  }
-}
-```
-
-### SSE Endpoint (any MCP client)
-
-```
-http://localhost:8765/mcp/{client_name}/sse/{user_id}
-```
-
-Example: `http://localhost:8765/mcp/opencode/sse/steven`
 
 ### REST API
 
