@@ -222,10 +222,13 @@ class EnhancedMemoryManager:
             all_results = []
             for fact in novel_facts:
                 try:
+                    # infer=False: skip LLM re-extraction since we already
+                    # extracted and deduped facts above
                     response = self.memory_client.add(
-                        fact,
+                        [{"role": "user", "content": fact}],
                         user_id=user_id,
-                        metadata=metadata or {}
+                        metadata=metadata or {},
+                        infer=False,
                     )
                     all_results.extend(response.get('results', []))
                 except Exception as e:
