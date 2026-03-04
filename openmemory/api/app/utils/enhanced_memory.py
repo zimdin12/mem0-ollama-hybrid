@@ -214,16 +214,23 @@ class EnhancedMemoryManager:
                 existing_facts.extend(facts)
         
         # 4. Identify truly new facts
-        novel_facts = self._find_novel_facts(new_facts, existing_facts)
+        novel_facts = self._find_novel_facts(new_facts, existing_facts, user_id=user_id)
         
-        # 5. Add only new information
+        # 5. Add only new information — add each fact individually to avoid
+        #    LLM re-extraction generating phantom facts from context
         if novel_facts:
-            novel_text = ". ".join(novel_facts)
-            response = self.memory_client.add(
-                novel_text,
-                user_id=user_id,
-                metadata=metadata or {}
-            )
+            all_results = []
+            for fact in novel_facts:
+                try:
+                    response = self.memory_client.add(
+                        fact,
+                        user_id=user_id,
+                        metadata=metadata or {}
+                    )
+                    all_results.extend(response.get('results', []))
+                except Exception as e:
+                    logging.warning(f"Failed to add fact '{fact[:50]}': {e}")
+            response = {'results': all_results}
             
             status = "new" if not existing_memories else "updated"
             summary = f"Added {len(novel_facts)} new facts. Found {len(existing_facts)} existing related facts."
@@ -299,10 +306,41 @@ class EnhancedMemoryManager:
         return entities[:5]  # Limit to avoid too many queries
     
     def _find_related_entities(self, entity: str, user_id: str) -> List[Dict]:
-        """Find entities related to given entity in graph"""
-        # This would query Neo4j for relationships
-        # Simplified implementation
-        return []
+        """Find entities related to given entity in Neo4j graph"""
+        results = []
+        try:
+            if not (hasattr(self.memory_client, 'graph') and self.memory_client.graph):
+                return results
+            graph = self.memory_client.graph
+            if not hasattr(graph, 'graph'):
+                return results
+            driver = graph.graph.driver if hasattr(graph.graph, 'driver') else None
+            if not driver:
+                # Try _driver attribute (neo4j graph store)
+                driver = getattr(graph.graph, '_driver', None)
+            if not driver:
+                return results
+
+            query = """
+            MATCH (n)-[r]-(m)
+            WHERE toLower(n.name) CONTAINS toLower($entity)
+            RETURN n.name AS source, type(r) AS relationship, m.name AS target
+            LIMIT 10
+            """
+            with driver.session() as session:
+                records = session.run(query, entity=entity)
+                for record in records:
+                    content = f"{record['source']} {record['relationship']} {record['target']}"
+                    results.append({
+                        'content': content,
+                        'relevance': 0.8,
+                        'relationships': [
+                            {'source': record['source'], 'rel': record['relationship'], 'target': record['target']}
+                        ]
+                    })
+        except Exception as e:
+            logging.warning(f"Graph entity search failed for '{entity}': {e}")
+        return results
     
     def _calculate_text_relevance(self, query: str, text: str) -> float:
         """Simple text relevance calculation"""
@@ -323,18 +361,27 @@ class EnhancedMemoryManager:
         facts = [s.strip() for s in sentences if s.strip() and len(s.strip()) > 10]
         return facts
     
-    def _find_novel_facts(self, new_facts: List[str], existing_facts: List[str]) -> List[str]:
-        """Identify facts that are truly new"""
+    def _find_novel_facts(self, new_facts: List[str], existing_facts: List[str], user_id: str = None) -> List[str]:
+        """Identify facts that are truly new using Qdrant vector similarity"""
+        if not self.memory_client:
+            return new_facts
+
         novel = []
         for new_fact in new_facts:
-            is_novel = True
-            for existing_fact in existing_facts:
-                similarity = self._calculate_text_relevance(new_fact, existing_fact)
-                if similarity > 0.8:  # High similarity threshold
-                    is_novel = False
-                    break
-            if is_novel:
-                novel.append(new_fact)
+            try:
+                # Check directly against Qdrant for semantic duplicates
+                emb = self.memory_client.embedding_model.embed(new_fact, "search")
+                filters = {"user_id": user_id} if user_id else {}
+                hits = self.memory_client.vector_store.search(
+                    query=new_fact, vectors=emb, limit=1, filters=filters
+                )
+                best_score = hits[0].score if hits else 0
+                if best_score >= 0.85:
+                    logging.info(f"Dedup (enhanced): skip '{new_fact[:60]}' (score={best_score:.3f})")
+                    continue
+            except Exception as e:
+                logging.warning(f"Vector dedup failed, keeping fact: {e}")
+            novel.append(new_fact)
         return novel
     
     def _extract_memorable_content(self, user_message: str, llm_response: str) -> List[str]:
