@@ -96,16 +96,20 @@ All env vars are documented in `.env.example` files:
 Key variables for the API container:
 
 ```env
+# Ollama — where is it running?
+# host machine (Docker Desktop):  http://host.docker.internal:11434
+# Ollama in same compose stack:    http://ollama:11434
+# Remote machine:                  http://192.168.x.x:11434
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+
 # LLM (fact & entity extraction)
 LLM_PROVIDER=ollama
 LLM_MODEL=qwen3:4b-instruct-2507-q4_K_M
-OLLAMA_BASE_URL=http://ollama:11434        # Docker service name
-# or http://host.docker.internal:11434     # host Ollama
 
 # Embeddings
 EMBEDDER_PROVIDER=ollama
 EMBEDDER_MODEL=qwen3-embedding:0.6b
-EMBEDDER_OLLAMA_BASE_URL=http://ollama:11434
+EMBEDDER_OLLAMA_BASE_URL=http://host.docker.internal:11434
 
 # Qdrant
 VECTOR_STORE_PROVIDER=qdrant
