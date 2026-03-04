@@ -1,207 +1,258 @@
 # Fork Changes: Ollama + Hybrid Memory (Local-Only Mode)
 
-This document describes all changes made in this fork (`mem0-ollama-hybrid`) relative
-to the upstream [mem0ai/mem0](https://github.com/mem0ai/mem0) repository.
+All changes in this fork (`mem0-ollama-hybrid`) relative to upstream
+[mem0ai/mem0](https://github.com/mem0ai/mem0).
 
 **Goal**: Run OpenMemory fully locally using Ollama (no OpenAI dependency), with hybrid
-memory mode enabled (vector store + graph database).
+memory mode enabled (vector store + graph database + temporal context).
 
 ---
 
-## 1. Ollama LLM Compatibility Fix (`openmemory/api/app/utils/memory.py`)
+## 1. JSON-Based Graph Extraction (`openmemory/api/fix_graph_entity_parsing.py`)
 
-**Why**: mem0 expects LLM responses in specific formats (tool_calls dicts for graph
-extraction, plain strings for fact extraction). Small local models like `qwen3:4b` return
-responses in inconsistent formats — sometimes as plain text, sometimes as partial JSON,
-sometimes with verbose parenthetical notes.
+**Problem**: Upstream uses 3-4 sequential LLM calls with tool/function calling for graph
+extraction (entity extraction → relationship extraction → delete decision). qwen3:4b cannot
+reliably produce tool_calls — returns empty arrays, wrong arguments, or malformed JSON.
 
-**What**: Added `_apply_essential_ollama_fix()` that monkey-patches
-`OllamaLLM.generate_response()` to:
-- Return **strings** for fact extraction (fixes `AttributeError: 'dict' has no 'strip'`)
-- Return **dicts with tool_calls** for entity/relationship extraction
-- Parse multiple qwen3 output formats into proper tool_calls:
-  - `extract_entities([...])` function call syntax
-  - Bare JSON arrays `[{"source":..., "relationship":...}]`
-  - Structured text (Entity/Type blocks, bullet lists)
-  - Mixed format arrays (strings and dicts)
+**Solution**: Complete replacement with a single Ollama JSON mode call:
+- Uses `format: 'json'` in the Ollama API (forces valid JSON output)
+- Single prompt extracts both entities and relationships in one call
+- Entity blocklist filters file extensions (.php, .js) and generic words
+- Skips the delete step entirely (too unreliable with small LLMs)
+- Validates relationships (both source and target must exist in entity map)
+- Filters self-referential relationships
 
-## 2. Graph Entity Extraction Fix (`fix_graph_entity_parsing.py`)
+**Result**: 79-84 graph nodes and 109-135 relationships from test data (was 19 nodes with
+tool calling). Graph contributes to 7/10 search queries.
 
-**Why**: qwen3:4b adds parenthetical notes and verbose explanations to entity names
-(e.g., `"Steven (source entity"` instead of `"Steven"`), breaking graph storage.
+## 2. Ollama LLM Compatibility Fix (`openmemory/api/app/utils/memory.py`)
 
-**What**: Monkey-patches `MemoryGraph._retrieve_nodes_from_data` and
-`_establish_nodes_relations_from_data` with:
-- Concise, directive prompts that force tool calling
-- Regex cleaning for entity names/types (removes parentheses, arrows, quotes)
-- Handles mixed formats (strings and dicts in entity arrays)
-- Type guessing fallback for overly verbose entity_type fields
+**Problem**: mem0 expects LLM responses in specific formats (tool_calls dicts for graph
+extraction, plain strings for fact extraction). Small local models like qwen3:4b return
+responses in inconsistent formats.
 
-## 3. Custom Prompts for Small Models (`custom_update_prompt.py`)
+**Solution**: `_apply_essential_ollama_fix()` monkey-patches `OllamaLLM.generate_response()`:
+- Returns **strings** for fact extraction (fixes `AttributeError: 'dict' has no 'strip'`)
+- Returns **dicts with tool_calls** for entity/relationship extraction
+- Parses multiple qwen3 output formats: function call syntax, bare JSON arrays, structured
+  text blocks, bullet lists, mixed format arrays
 
-**Why**: Default mem0 prompts are designed for GPT-4 and are too verbose/ambiguous for
-4B-parameter models. Small models need explicit, structured instructions.
+## 3. Enhanced Memory Manager (`openmemory/api/app/utils/enhanced_memory.py`)
 
-**What**: Three optimized prompts:
-- **Fact extraction**: Forces JSON-only output with many examples of breaking prose
-  into individual facts
+**New class** providing hybrid intelligence across all storage layers:
+
+### Hybrid Search (3 dimensions)
+1. **Vector search**: Semantic similarity in Qdrant
+2. **Graph search**: Entity relationships in Neo4j via directed Cypher queries
+3. **Temporal search**: Recency-weighted (30-day decay) from SQLite
+
+Results are deduplicated by ID/content, then interleaved by source:
+- 60% vector (most informative for content retrieval)
+- 30% graph (structural relationships, entity queries)
+- 10% temporal (recent context)
+
+Graph results scored at 0.65 (vs vector 0.5-0.85) to provide context without dominating.
+
+### Smart Addition
+- Extracts facts via regex with protected splitting (file extensions, version numbers, paths)
+- Checks each fact against Qdrant for semantic duplicates (threshold ≥ 0.85)
+- Stores each fact individually with `infer=False, graph=False` (no LLM re-extraction)
+- Runs ONE graph extraction call on the full original text in a **background thread**
+- Returns detailed status: new / updated / duplicate
+
+### Fact Extraction Improvements
+Regex-based splitting that protects:
+- File extensions: `.php`, `.js`, `.py`, `.json`, etc.
+- Version numbers: `v3.3`, `PHP 8.2+`, `1.17.0`
+- File paths: `src/components/App.tsx`
+- Uses placeholder substitution during split, restores after
+- Post-validation: minimum 20 chars, rejects orphaned fragments
+
+**Result**: 0 broken fragments (was ~28% with naive splitting on code content).
+
+### Async Graph Extraction
+Graph extraction (~3s LLM call) runs in a daemon thread. The API responds immediately
+after vector storage (~0.5s). Graph populates within 3-5 seconds asynchronously.
+
+**Result**: 5x faster memory addition (0.5s vs 4.5s for medium texts).
+
+## 4. Custom Prompts for Small Models (`openmemory/api/custom_update_prompt.py`)
+
+Default mem0 prompts are designed for GPT-4 and are too verbose for 4B models.
+
+Three optimized prompts:
+- **Fact extraction**: Forces JSON-only output, many examples of breaking prose into
+  individual facts, today's date for context
 - **Update memory**: Clear decision rules (ADD/UPDATE/DELETE/NONE) with bias toward
   preserving information rather than over-deduplicating
-- **Graph relationships**: Comprehensive entity and relationship extraction with
-  explicit format examples
+- **Graph relationships**: Code-aware relationship types (is_a, uses, extends, contains,
+  implements, depends_on), filters file extensions and generic words
 
-## 4. Config Files Changed to Environment Variables
+## 5. Core mem0 Library Changes
 
-### `openmemory/api/config.json` & `default_config.json`
+### `mem0/memory/main.py`
+- Added `graph: bool = True` parameter to `Memory.add()`
+- When `graph=False`, skips graph extraction in the ThreadPoolExecutor
+- Allows per-fact vector storage without redundant per-fact graph calls
 
-**Why**: Hardcoded OpenAI provider and API key references don't work for local Ollama.
+### `mem0/memory/graph_memory.py`
+- **Entity list bug fix**: When `custom_prompt` was set, the user message omitted the
+  entity list, causing relationship extraction to fail. Now always includes entity list.
+- Added tech-specific entity type rules to the entity extraction system prompt
 
-**What**: All provider/model/URL fields use `env:VARIABLE_NAME` pattern:
+## 6. MCP Server Enhancements (`openmemory/api/app/mcp_server.py`)
+
+### Tools (7 total)
+
+| Tool | Description |
+|------|-------------|
+| `add_memories` | Smart add with dedup (via `enhanced_memory_manager`) |
+| `search_memory` | Hybrid search: vector + graph + temporal (limit: 10) |
+| `list_memories` | List all memories with permission filtering |
+| `delete_memories` | Delete by ID, syncs SQLite state |
+| `delete_all_memories` | Bulk deletion with state management |
+| `handle_conversation` | Process user message + LLM response, extract memorable content |
+| `get_related_memories` | Relationship traversal, grouped by source (vector/graph/temporal) |
+
+### Permission Filter Fix
+Graph and temporal results have generated UUIDs (not in SQLite). The permission filter
+checked `result.id in accessible_memory_ids`, silently dropping all non-vector results.
+Fixed: graph/temporal results bypass permission check (they have no SQLite entry).
+
+### Entity Extraction for Search
+Improved query entity extraction: strips punctuation, expanded stopwords list. Prevents
+issues like `"steven?"` not matching `"steven"` in Neo4j CONTAINS queries.
+
+## 7. Config Loading Hierarchy (`openmemory/api/app/utils/memory.py`)
+
+Upstream loads config from database only. This fork uses a cascade:
+
+1. **Defaults** from `get_default_memory_config()` (auto-detects Ollama URL in Docker)
+2. **config.json** overrides (production settings with `env:VAR_NAME` references)
+3. **Database** — IGNORED for llm/embedder/vector_store (prevents OpenAI defaults)
+   - Only `custom_instructions` read from DB
+4. **Environment variables** parsed throughout (type conversion for ports and dimensions)
+
+### Docker Host Resolution
+Auto-detects Ollama URL when running in Docker:
+1. `OLLAMA_HOST` env var
+2. `host.docker.internal` (Docker Desktop Mac/Windows)
+3. Docker bridge gateway from `/proc/net/route` (Linux)
+4. Fallback: `172.17.0.1`
+
+## 8. Config Files (`openmemory/api/config.json`)
+
+All provider fields use `env:VARIABLE_NAME` pattern:
 - `LLM_PROVIDER`, `LLM_MODEL`, `OLLAMA_BASE_URL`
 - `EMBEDDER_PROVIDER`, `EMBEDDER_MODEL`, `EMBEDDER_OLLAMA_BASE_URL`
 - `VECTOR_STORE_PROVIDER`, `QDRANT_HOST`, `QDRANT_PORT`, `QDRANT_COLLECTION`
 - `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`
 
-Also added **graph_store** section (neo4j) and **vector_store** section (qdrant) which
-were absent from the upstream config.
+Added `graph_store` section (Neo4j) and `vector_store` section (Qdrant) which were
+absent from upstream config.
 
-### `openmemory/api/app/utils/memory.py` — Config loading
+## 9. Categorization (`openmemory/api/app/utils/categorization.py`)
 
-**Why**: Upstream only loads config from database. We need config.json as a reliable
-fallback (especially for first startup before any UI config is saved).
+Upstream uses hardcoded `OpenAI()` client with `gpt-4o-mini` and structured output
+(`beta.chat.completions.parse`).
 
-**What**: Config loading order: `config.json` → database override → environment variable
-parsing. Added integer conversion for `embedding_model_dims` and `port` fields.
-Added `graph_store` loading support alongside existing llm/embedder/vector_store.
+Fork uses:
+- `OpenAI(base_url=OLLAMA_BASE_URL/v1, api_key="ollama")` compatible client
+- Regular `chat.completions.create` (no structured output)
+- Manual JSON parsing with markdown code block fallback
+- Returns empty list on failure (non-fatal)
 
-## 5. Categorization Changed to Ollama (`openmemory/api/app/utils/categorization.py`)
+## 10. Memory Router (`openmemory/api/app/routers/memories.py`)
 
-**Why**: Used hardcoded `OpenAI()` client and `gpt-4o-mini` with structured output
-(`beta.chat.completions.parse`), which requires an OpenAI API key.
+### New Graph Endpoints
+- `GET /graph/stats` — Entity/relationship counts
+- `GET /{memory_id}/entities` — Extract entities from a specific memory
+- `GET /graph/search` — Search for entities by name
+- `GET /graph/entity/{entity_name}/related` — Related entities via Cypher
+- `GET /graph/entity/{entity_name}/memories` — Memories mentioning an entity
+- `GET /graph/visualize` — Graph nodes/edges for visualization
+- `GET /graph/context/{topic}` — Comprehensive context via graph traversal
 
-**What**:
-- Uses `OpenAI(base_url=OLLAMA_BASE_URL/v1, api_key="ollama")` compatible client
-- Regular `chat.completions.create` instead of structured output (Ollama doesn't support it)
-- Manual JSON parsing with markdown code block extraction fallback
-- Returns empty list on failure instead of raising (prevents crashes on parse errors)
+### Memory Operations
+- `CreateMemoryRequest` accepts `messages[]` (conversation format)
+- DELETE events from mem0 sync to SQLite state (no phantom entries)
+- `POST /sync-storage` — Bi-directional sync between Qdrant and SQLite
 
-## 6. Enhanced Memory Manager (`openmemory/api/app/utils/enhanced_memory.py`)
+## 11. Database (`openmemory/api/app/database.py`)
 
-**Why**: Upstream MCP tools do basic vector-only search. With a graph database available,
-we want hybrid search across all memory dimensions.
+SQLite persistence fix:
+```python
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./db/openmemory.db")
+os.makedirs("db", exist_ok=True)
+```
+Ensures `./db/` directory exists for Docker volume mounting (`openmemory-db` volume).
 
-**What**: New `EnhancedMemoryManager` class providing:
-- **Hybrid search**: Vector similarity + graph relationship + temporal recency search
-- **Smart add**: Checks existing memories before adding, skips duplicates
-- **Comprehensive conversation handling**: Extracts memorable content from both user
-  messages and LLM responses
+## 12. Docker Compose Override (`openmemory/docker-compose.override.yml`)
 
-## 7. MCP Server Changes (`openmemory/api/app/mcp_server.py`)
-
-**Why**: Upstream MCP tools use simple vector-only search and basic memory addition.
-With hybrid mode, we want richer search and smarter addition.
-
-**What**:
-- `add_memories`: Uses `enhanced_memory_manager.smart_add_memory()` for deduplication
-- `search_memory`: Uses `enhanced_memory_manager.hybrid_search()` across all dimensions
-- Added `handle_conversation` tool: Processes both user message + LLM response
-- Added `get_related_memories` tool: Relationship traversal via graph
-
-## 8. Memory Router Changes (`openmemory/api/app/routers/memories.py`)
-
-**Why**: Upstream router doesn't handle graph queries or long document chunking.
-
-**What**:
-- `CreateMemoryRequest` accepts `messages[]` in addition to `text` (for conversation format)
-- Graph query helpers (`query_graph`, `get_memory_entities_from_graph`, etc.)
-- Fallback chunking for long texts that mem0 returns empty results for
-- Direct Qdrant vector storage as last-resort fallback
-
-## 9. Docker Compose Override (`openmemory/docker-compose.override.yml`)
-
-**Why**: Upstream doesn't include Neo4j or configure networking for Ollama access.
-
-**What**:
-- **Neo4j** container (5.26.4) with APOC plugin, healthcheck, mapped to ports 8474/8687
-- **Qdrant** (`mem0_store`) with custom init script, healthcheck, curl install
-- `openmemory-mcp` depends on neo4j healthy + mem0_store healthy
+- **Neo4j 5.26.4**: Graph database with APOC plugin, ports 8474/8687, healthcheck
+- **Qdrant init**: Pre-creates `openmemory` collection (1024-dim cosine)
 - `extra_hosts: host.docker.internal:host-gateway` for Ollama access from containers
-- `openmemory-ui` build args for custom API URL and user ID
 - Shared `openmemory_network` bridge network
+- Service dependency ordering with healthchecks
 
-## 10. Qdrant Init Script (`openmemory/init-qdrant.sh`)
+## 13. Qdrant Init Script (`openmemory/init-qdrant.sh`)
 
-**Why**: Qdrant needs the `openmemory` collection pre-created with correct dimensions
-(1024 for `qwen3-embedding:0.6b`). Without it, mem0 fails on first write.
+Waits for Qdrant readiness, then creates `openmemory` collection with 1024-dim Cosine
+vectors. Lets mem0 auto-create `mem0migrations` collection. Non-fatal if collection exists.
 
-**What**: Shell script that waits for Qdrant readiness, then creates `openmemory`
-collection with 1024-dim Cosine vectors. Lets mem0 auto-create `mem0migrations`.
-
-## 11. Requirements Changes
+## 14. Requirements Changes
 
 ### `openmemory/api/requirements.txt`
-- Added `langchain-neo4j` — required for mem0's Neo4j graph store integration
-- Added `rank-bm25` — used for BM25 text search in hybrid search
+- Added `langchain-neo4j` — Required for mem0's Neo4j graph store
+- Added `rank-bm25` — BM25 text search for hybrid search
 
-### `server/requirements.txt`
-- Added `psycopg2` — PostgreSQL adapter (needed alongside psycopg3)
+## 15. Test Suite (`test_memory_system.py`)
 
-## 12. Server Docker Compose (`server/docker-compose.yaml`)
-
-**What**: Changed default credentials:
-- PostgreSQL: `postgres/postgres` → `mem0/openmemory`
-- Neo4j: `neo4j/mem0graph` → `neo4j/openmemory`
+5-phase comprehensive test:
+1. **Insert**: 12 chunks of varied sizes (short/medium/long, dense/sparse, + duplicate test)
+2. **Validate**: Verify Qdrant vectors, Neo4j nodes/rels, SQLite memories all match
+3. **Graph quality**: List all entities/relationships, check for garbage (file extensions)
+4. **Search quality**: 10 diverse queries, verify correct top result, measure graph contribution
+5. **Dedup quality**: Check for exact duplicates and broken fragments in Qdrant
 
 ---
 
-## Environment Variables (`.env`)
+## Deduplication Pipeline
 
-Required environment variables for local Ollama operation:
+Three layers prevent duplicate storage:
 
-```env
-# LLM
-LLM_PROVIDER=ollama
-OLLAMA_BASE_URL=http://192.168.100.10:11434  # or host.docker.internal:11434
-LLM_MODEL=qwen3:4b-instruct
+1. **main.py** (cosine ≥ 0.95): mem0's built-in dedup in `_add_to_vector_store`
+2. **enhanced_memory.py** (cosine ≥ 0.85): Pre-check in `_find_novel_facts` before any storage
+3. **infer=False**: Skip LLM re-extraction when storing pre-extracted facts
 
-# Embeddings
-EMBEDDER_PROVIDER=ollama
-EMBEDDER_MODEL=qwen3-embedding:0.6b
-EMBEDDER_OLLAMA_BASE_URL=http://192.168.100.10:11434
+---
 
-# Graph (Neo4j)
-NEO4J_URI=bolt://neo4j:7687
-NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=openmemory
+## Files Summary
 
-# Vector (Qdrant)
-VECTOR_STORE_PROVIDER=qdrant
-QDRANT_HOST=mem0_store
-QDRANT_PORT=6333
-QDRANT_COLLECTION=openmemory
-QDRANT_EMBEDDING_DIMS=1024
-```
+### Added (not in upstream)
 
-## Files Added (Not in Upstream)
+| File | Lines | Purpose |
+|------|-------|---------|
+| `openmemory/api/app/utils/enhanced_memory.py` | ~570 | Hybrid search, smart add, async graph |
+| `openmemory/api/fix_graph_entity_parsing.py` | ~225 | JSON-based graph extraction |
+| `openmemory/api/custom_update_prompt.py` | ~140 | Optimized prompts for qwen3:4b |
+| `openmemory/docker-compose.override.yml` | ~50 | Neo4j + networking |
+| `openmemory/init-qdrant.sh` | ~20 | Collection initialization |
+| `mcp-server/server.js` | ~200 | Standalone MCP server (stdio) |
+| `mcp-server/SKILL.md` | ~50 | Claude Code skill definition |
+| `test_memory_system.py` | ~300 | Comprehensive test suite |
 
-| File | Purpose |
-|------|---------|
-| `openmemory/docker-compose.override.yml` | Neo4j + Qdrant init + networking |
-| `openmemory/init-qdrant.sh` | Pre-create Qdrant collection |
-| `openmemory/api/app/utils/enhanced_memory.py` | Hybrid search + smart add |
-| `fix_graph_entity_parsing.py` | Qwen3 graph extraction fix |
-| `custom_update_prompt.py` | Optimized prompts for small models |
+### Modified (vs upstream)
 
-## Files Modified (vs Upstream)
-
-| File | Key Change |
-|------|------------|
-| `openmemory/api/app/utils/memory.py` | Ollama fix, config.json loading, graph_store support |
-| `openmemory/api/app/utils/categorization.py` | OpenAI → Ollama |
-| `openmemory/api/app/mcp_server.py` | Enhanced memory manager integration |
-| `openmemory/api/app/routers/memories.py` | Graph queries, chunking, messages[] support |
-| `openmemory/api/config.json` | Env vars, graph_store, vector_store |
-| `openmemory/api/default_config.json` | Env vars, graph_store, vector_store |
+| File | Key Changes |
+|------|-------------|
+| `openmemory/api/app/utils/memory.py` | Ollama fix (~300 lines), config cascade, Docker host detection |
+| `openmemory/api/app/utils/categorization.py` | OpenAI → Ollama with JSON fallback parsing |
+| `openmemory/api/app/mcp_server.py` | Enhanced memory manager, 7 tools, permission filter fix |
+| `openmemory/api/app/routers/memories.py` | 7 graph endpoints, DELETE sync, messages[] support |
+| `openmemory/api/app/routers/config.py` | Env-based defaults, no auto-create DB rows |
+| `openmemory/api/app/database.py` | SQLite path for Docker volume persistence |
+| `openmemory/api/config.json` | Env var references for all providers |
+| `mem0/memory/main.py` | `graph=False` parameter on `Memory.add()` |
+| `mem0/memory/graph_memory.py` | Entity list bug fix, tech entity types |
 | `openmemory/api/requirements.txt` | +langchain-neo4j, +rank-bm25 |
-| `server/docker-compose.yaml` | Credential changes |
-| `openmemory/README.md` | Fork documentation |

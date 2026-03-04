@@ -322,26 +322,31 @@ Upstream mem0 defaults to OpenAI for everything. This fork replaces all cloud de
 | Area | Upstream | This Fork |
 |------|----------|-----------|
 | LLM | OpenAI GPT-4 | Ollama (qwen3:4b-instruct) |
-| Embeddings | OpenAI ada-002 | Ollama (qwen3-embedding:0.6b) |
-| Config | Hardcoded OpenAI keys | Environment variables |
+| Embeddings | OpenAI ada-002 | Ollama (qwen3-embedding:0.6b, 1024d) |
+| Config | Hardcoded OpenAI keys | Environment variables (cascade: config.json → env) |
 | Categorization | OpenAI structured output | Ollama + manual JSON parsing |
-| Graph extraction | Assumes GPT-4 tool calling | Monkey-patched parser for qwen3 output formats |
+| Graph extraction | GPT-4 tool calling (3-4 LLM calls) | Single Ollama JSON mode call (`format:'json'`) |
+| Fact extraction | Naive sentence splitting | Protected splitting (preserves file extensions, versions, paths) |
 | Prompts | Verbose (for GPT-4) | Concise, directive (for 4B models) |
-| Memory search | Vector only | Hybrid: vector + graph + temporal |
-| Config source | Database only | config.json → DB → env vars (cascade) |
-| MCP tools | Basic | Enhanced (hybrid search, smart add, graph traversal) |
+| Memory search | Vector only | Hybrid: vector + graph + temporal (interleaved 60/30/10) |
+| Memory addition | Synchronous, per-fact graph | Async graph extraction in background thread (5x faster) |
+| Deduplication | Basic | Three-layer: cosine ≥ 0.95, vector ≥ 0.85, infer=False |
+| MCP tools | Basic (4 tools) | Enhanced (7 tools: hybrid search, smart add, graph traversal) |
+| MCP permissions | Filters out graph results | Correctly passes graph/temporal results through |
+| `Memory.add()` | No control over graph | Added `graph=False` parameter for per-fact control |
 
 ### Files Added
 
 | File | Purpose |
 |------|---------|
+| `openmemory/api/app/utils/enhanced_memory.py` | Hybrid search, smart dedup, async graph extraction |
+| `openmemory/api/fix_graph_entity_parsing.py` | JSON-based graph extraction (replaces tool calling) |
+| `openmemory/api/custom_update_prompt.py` | Optimized prompts for qwen3:4b |
 | `openmemory/docker-compose.override.yml` | Neo4j + Qdrant init + networking |
 | `openmemory/init-qdrant.sh` | Pre-create Qdrant collection (1024d cosine) |
-| `openmemory/api/app/utils/enhanced_memory.py` | Hybrid search + smart dedup |
-| `fix_graph_entity_parsing.py` | Qwen3 graph extraction parser |
-| `custom_update_prompt.py` | Optimized prompts for small models |
 | `mcp-server/server.js` | Standalone MCP server (4 tools, stdio transport) |
 | `mcp-server/SKILL.md` | Claude Code skill for auto-recall/capture behavior |
+| `test_memory_system.py` | 5-phase test suite (insert, validate, graph, search, dedup) |
 
 ### Files Modified
 
@@ -349,13 +354,31 @@ Upstream mem0 defaults to OpenAI for everything. This fork replaces all cloud de
 |------|--------|
 | `openmemory/api/app/utils/memory.py` | Ollama compatibility, env-based config, graph store |
 | `openmemory/api/app/utils/categorization.py` | OpenAI → Ollama |
-| `openmemory/api/app/mcp_server.py` | Enhanced memory manager |
-| `openmemory/api/app/routers/memories.py` | Graph queries, DELETE sync, no phantoms |
+| `openmemory/api/app/mcp_server.py` | Enhanced memory manager, graph/temporal filter fix |
+| `openmemory/api/app/routers/memories.py` | Graph endpoints, DELETE sync, no phantoms |
 | `openmemory/api/app/routers/config.py` | Env-based defaults, no auto-create DB rows |
 | `openmemory/api/app/database.py` | SQLite path fix for Docker volume persistence |
 | `openmemory/api/config.json` | Env var references for all providers |
+| `mem0/memory/main.py` | Added `graph=False` parameter to `Memory.add()` |
+| `mem0/memory/graph_memory.py` | Entity list bug fix, tech entity types |
 
 For the full technical changelog, see [FORK_CHANGES.md](FORK_CHANGES.md).
+
+## Performance
+
+Benchmarked on RTX 4090 with qwen3:4b + qwen3-embedding:0.6b:
+
+| Operation | Latency | Notes |
+|-----------|---------|-------|
+| Hybrid search | 90-135ms | Embedding + Qdrant + Neo4j + dedup |
+| Add (short text) | ~0.4s | Vector stored immediately |
+| Add (medium text) | ~0.5s | Multiple facts extracted |
+| Add (long text) | ~0.9s | Many facts, dedup checks |
+| Graph population | 3-5s | Runs async after API response |
+
+Embedding model comparison (qwen3-embedding):
+- **0.6b** (current): 98ms/embed, optimal for short facts
+- **4b**: 562ms/embed (5.7x slower), no quality gain for memory-length texts
 
 ## Data Persistence
 

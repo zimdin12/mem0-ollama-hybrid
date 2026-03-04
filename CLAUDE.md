@@ -1,6 +1,6 @@
 # OpenMemory — Local Hybrid Memory System (Ollama Fork)
 
-This is a mem0 fork that runs 100% locally using Ollama. It provides hybrid memory (vector + graph) for AI assistants.
+A mem0 fork that runs 100% locally using Ollama. Provides hybrid memory (vector + graph + temporal) for AI assistants.
 
 ## How to Install for Claude Code
 
@@ -39,18 +39,23 @@ Claude Code auto-discovers skills from `.claude/skills/` — no CLI command need
 
 The OpenMemory API must be running on port 8765. If it's not running yet, see the Deployment section in README.md.
 
-## Tools Available After Setup
+## MCP Tools Available After Setup
 
 | Tool | Description |
 |------|-------------|
-| `mem_search` | Search memories (vector + graph hybrid) |
-| `mem_store` | Store a memory (auto-extracts entities) |
-| `mem_forget` | Delete a memory by ID |
-| `mem_related` | Explore entity relationships via graph |
+| `search_memory` | Hybrid search across vector + graph + temporal (returns 10 results) |
+| `add_memories` | Smart add with dedup — only stores truly new information |
+| `list_memories` | List all memories with permission filtering |
+| `delete_memories` | Delete specific memories by ID |
+| `delete_all_memories` | Delete all memories for the user |
+| `handle_conversation` | Process user message + LLM response, extract memorable content |
+| `get_related_memories` | Explore entity relationships via graph traversal |
 
 ## Project Structure
 
 - `openmemory/` — Docker services: FastAPI backend (port 8765) + Next.js UI (port 3000/3100)
 - `mcp-server/` — Host-side MCP server (Node.js stdio) + Claude Code skill
-- `mem0/` — Core mem0 Python library (from upstream)
+- `mem0/` — Core mem0 Python library (modified from upstream)
+- `test_memory_system.py` — 5-phase test suite
 - See README.md for full deployment and environment variable docs
+- See FORK_CHANGES.md for detailed technical changelog vs upstream
