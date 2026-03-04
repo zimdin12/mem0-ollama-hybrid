@@ -53,55 +53,100 @@ Searching for *"what GPU does Steven use"* returns results from both the vector 
 
 Both run on GPU via Ollama. Total VRAM: ~3 GB.
 
-## Setup
+## Deployment
 
-This fork is designed to run as part of a Docker Compose stack. See the [parent repo](https://github.com/zimdin12/openclaw-adv-mem-local) for the full deployment.
+### As part of OpenClaw (recommended)
 
-### Standalone (if running outside the parent stack)
+This repo is used as a git submodule in [openclaw-adv-mem-local](https://github.com/zimdin12/openclaw-adv-mem-local). The parent repo's `docker-compose.yml` defines all services (Qdrant, Neo4j, Ollama, API, UI) with the correct networking and env vars. **Do not use the `openmemory/` compose files** when running inside the parent stack.
+
+### Standalone
 
 ```bash
 # 1. Clone
 git clone https://github.com/zimdin12/mem0-ollama-hybrid.git
 cd mem0-ollama-hybrid
 
-# 2. Pull Ollama models
+# 2. Pull Ollama models (requires Ollama running on the host)
 ollama pull qwen3:4b-instruct-2507-q4_K_M
 ollama pull qwen3-embedding:0.6b
 
-# 3. Start services
+# 3. Copy env files
 cd openmemory
+cp api/.env.example api/.env    # edit if Ollama is not on the default host
+cp ui/.env.example ui/.env
+
+# 4. Start services
 docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
 
-# 4. Verify
+# 5. Verify
 curl http://localhost:8765/docs    # API docs
-open http://localhost:3100          # Memory UI
+open http://localhost:3000         # Memory UI
 ```
 
 ### Environment Variables
 
+All env vars are documented in `.env.example` files:
+
+| File | Purpose |
+|------|---------|
+| `openmemory/api/.env.example` | API server — LLM, embedder, Qdrant, Neo4j config |
+| `openmemory/ui/.env.example` | UI dashboard — API URL and user ID |
+| `mcp-server/.env.example` | MCP server (host-side) — API URL and user ID |
+
+Key variables for the API container:
+
 ```env
-# LLM (extraction)
+# LLM (fact & entity extraction)
 LLM_PROVIDER=ollama
 LLM_MODEL=qwen3:4b-instruct-2507-q4_K_M
-OLLAMA_BASE_URL=http://host.docker.internal:11434
+OLLAMA_BASE_URL=http://ollama:11434        # Docker service name
+# or http://host.docker.internal:11434     # host Ollama
 
 # Embeddings
 EMBEDDER_PROVIDER=ollama
 EMBEDDER_MODEL=qwen3-embedding:0.6b
-EMBEDDER_OLLAMA_BASE_URL=http://host.docker.internal:11434
+EMBEDDER_OLLAMA_BASE_URL=http://ollama:11434
 
-# Graph (Neo4j)
-NEO4J_URI=bolt://neo4j:7687
-NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=openmemory
-
-# Vector (Qdrant)
+# Qdrant
 VECTOR_STORE_PROVIDER=qdrant
-QDRANT_HOST=qdrant
+QDRANT_HOST=mem0_store
 QDRANT_PORT=6333
 QDRANT_COLLECTION=openmemory
 QDRANT_EMBEDDING_DIMS=1024
+
+# Neo4j
+NEO4J_URI=bolt://neo4j:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=openmemory
 ```
+
+### Repository Structure
+
+```
+mem0-fork/
+├── openmemory/                    # Docker services (API + UI)
+│   ├── api/                       # FastAPI backend (Python)
+│   │   ├── app/routers/           # REST endpoints
+│   │   ├── app/utils/             # Memory client, Ollama fixes
+│   │   ├── config.json            # mem0 config (env var references)
+│   │   ├── Dockerfile
+│   │   └── .env.example
+│   ├── ui/                        # Next.js dashboard
+│   │   ├── Dockerfile
+│   │   └── .env.example
+│   ├── docker-compose.yml         # Base services (Qdrant, API, UI)
+│   ├── docker-compose.override.yml # Neo4j, networking, health checks
+│   └── init-qdrant.sh             # Collection init (1024d cosine)
+├── mcp-server/                    # Host-side MCP server (NOT containerized)
+│   ├── server.js                  # Node.js stdio transport, 4 tools
+│   ├── SKILL.md                   # Claude Code skill (auto-recall/capture)
+│   ├── package.json
+│   └── .env.example
+├── mem0/                          # Core mem0 library (Python, from upstream)
+└── README.md
+```
+
+**Important:** `mcp-server/` runs on the **host machine** (not in Docker). It's a Node.js process that Claude Code or OpenCode spawn via stdio. It talks to the OpenMemory API over HTTP.
 
 ## Connecting Clients
 
