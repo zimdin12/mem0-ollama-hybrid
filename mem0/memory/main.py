@@ -469,6 +469,10 @@ class Memory(MemoryBase):
             search_filters["agent_id"] = filters["agent_id"]
         if filters.get("run_id"):
             search_filters["run_id"] = filters["run_id"]
+
+        DEDUP_THRESHOLD = 0.95  # Skip facts that already exist with high similarity
+        dedup_skipped = []
+
         for new_mem in new_retrieved_facts:
             messages_embeddings = self.embedding_model.embed(new_mem, "add")
             new_message_embeddings[new_mem] = messages_embeddings
@@ -478,8 +482,21 @@ class Memory(MemoryBase):
                 limit=5,
                 filters=search_filters,
             )
+
+            # Auto-skip near-exact duplicates instead of relying on LLM
+            best_score = max((getattr(mem, "score", 0) for mem in existing_memories), default=0)
+            if best_score >= DEDUP_THRESHOLD:
+                logger.info(f"Dedup: skipping '{new_mem[:80]}' (score {best_score:.4f} >= {DEDUP_THRESHOLD})")
+                dedup_skipped.append(new_mem)
+                continue
+
             for mem in existing_memories:
                 retrieved_old_memory.append({"id": mem.id, "text": mem.payload.get("data", "")})
+
+        # Remove dedup-skipped facts so the LLM doesn't re-add them
+        if dedup_skipped:
+            new_retrieved_facts = [f for f in new_retrieved_facts if f not in dedup_skipped]
+            logger.info(f"Dedup: skipped {len(dedup_skipped)} near-duplicate facts, {len(new_retrieved_facts)} remaining")
 
         unique_data = {}
         for item in retrieved_old_memory:
