@@ -264,11 +264,19 @@ See `mcp-server/.env.example` for all env vars.
 
 The skill tells Claude *when* to use memory tools (auto-recall, auto-capture). It complements the MCP server — doesn't replace it.
 
+Copy into Claude Code's skill discovery directory:
+
 ```bash
-claude skill add /path/to/mcp-server/SKILL.md
+# Project-level (this repo only)
+mkdir -p .claude/skills/openmemory
+cp mcp-server/SKILL.md .claude/skills/openmemory/SKILL.md
+
+# Or personal (all projects)
+mkdir -p ~/.claude/skills/openmemory
+cp mcp-server/SKILL.md ~/.claude/skills/openmemory/SKILL.md
 ```
 
-Or copy `SKILL.md` into your project's `.claude/skills/` directory.
+Claude Code auto-discovers skills from `.claude/skills/` — no CLI command needed.
 
 ### OpenClaw
 

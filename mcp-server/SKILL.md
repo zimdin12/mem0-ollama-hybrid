@@ -1,3 +1,8 @@
+---
+name: openmemory
+description: Hybrid memory system (vector + graph). Use when recalling facts, storing preferences, or exploring entity relationships via mem_search, mem_store, mem_forget, mem_related tools.
+---
+
 # OpenMemory — Hybrid Memory System
 
 You have access to a persistent hybrid memory system (vector search + knowledge graph) via MCP tools. Use it to remember and recall information across sessions.

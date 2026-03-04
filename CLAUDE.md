@@ -21,9 +21,19 @@ claude mcp add openmemory -- node mcp-server/server.js
 
 ### 2. Skill (tells Claude when to use memory tools)
 
+Copy the skill file into Claude Code's skill discovery directory:
+
 ```bash
-claude skill add mcp-server/SKILL.md
+# Project-level (this repo only)
+mkdir -p .claude/skills/openmemory
+cp mcp-server/SKILL.md .claude/skills/openmemory/SKILL.md
+
+# Or personal (all projects)
+mkdir -p ~/.claude/skills/openmemory
+cp mcp-server/SKILL.md ~/.claude/skills/openmemory/SKILL.md
 ```
+
+Claude Code auto-discovers skills from `.claude/skills/` — no CLI command needed.
 
 ### Prerequisites
 

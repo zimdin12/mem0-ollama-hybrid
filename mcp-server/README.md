@@ -48,11 +48,17 @@ Or manually add to `~/.claude.json` or project `.mcp.json`:
 
 ### 2. Install skill (adds auto-recall/capture behavior)
 
-```bash
-claude skill add /path/to/mem0-fork/mcp-server/SKILL.md
-```
+Copy `SKILL.md` into Claude Code's skill discovery directory:
 
-Or copy `SKILL.md` into your project's `.claude/skills/` directory.
+```bash
+# Project-level
+mkdir -p .claude/skills/openmemory
+cp SKILL.md .claude/skills/openmemory/SKILL.md
+
+# Or personal (all projects)
+mkdir -p ~/.claude/skills/openmemory
+cp SKILL.md ~/.claude/skills/openmemory/SKILL.md
+```
 
 ## Add to OpenCode
 
