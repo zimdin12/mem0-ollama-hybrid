@@ -58,8 +58,13 @@ Graph results scored at 0.65 (vs vector 0.5-0.85) to provide context without dom
 
 ### Smart Addition
 - Extracts facts via regex with protected splitting (file extensions, version numbers, paths)
-- **Context injection**: Detects project/topic name from text header, prepends to orphaned facts
+- **Context injection**: Detects project/topic name from text opening, prepends to orphaned facts
   (e.g., `"Total development time 18 months"` → `"Echoes of the Fallen: Total development time 18 months"`)
+  - Only activates for texts > 300 chars (short texts are self-contained)
+  - Scans only first 80 chars / first sentence for topic (avoids picking list items as topics)
+  - Strips trailing prepositions from topic candidates ("Docker on Windows with" → rejected)
+  - Tech name blocklist prevents tools/frameworks being used as document topics
+  - Multi-topic detection: skips injection when 4+ distinct proper names found (list/survey text)
 - Checks each fact against Qdrant for semantic duplicates (threshold ≥ 0.85)
 - Stores each fact individually with `infer=False, graph=False` (no LLM re-extraction)
 - Graph extraction runs in **background thread**, chunked for long texts (~2000 chars/chunk)
@@ -68,7 +73,7 @@ Graph results scored at 0.65 (vs vector 0.5-0.85) to provide context without dom
 ### Fact Extraction Improvements
 - Splits on both newlines and sentence boundaries (handles bullets, headers, numbered lists)
 - Protects file extensions (`.php`, `.js`), version numbers (`v3.3`, `1.17.0`), file paths
-- Minimum fact length: 40 chars (filters headers and label-only lines)
+- Minimum fact length: 35 chars (filters headers and label-only lines)
 - Strips bullet markers (`*`, `-`, numbered items)
 - Rejects section headers (short title-cased lines without content)
 

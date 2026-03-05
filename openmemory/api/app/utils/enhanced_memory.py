@@ -481,7 +481,7 @@ class EnhancedMemoryManager:
             # Strip leading bullet markers and numbering
             restored = re.sub(r'^[\*\-\u2022]+\s*', '', restored).strip()
             restored = re.sub(r'^\d+[\.\)]\s*', '', restored).strip()
-            if not restored or len(restored) < 40:
+            if not restored or len(restored) < 35:
                 continue
             # Reject fragments starting with orphaned extensions/lowercase
             if re.match(r'^[a-z]{1,4}[)\]\s,]', restored):
@@ -517,25 +517,71 @@ class EnhancedMemoryManager:
         re.IGNORECASE
     )
 
+    # Prepositions that should not appear at the end of a topic name
+    _TRAILING_PREP_RE = re.compile(
+        r'(?:\s+(?:of|the|and|in|on|for|to|with|a|an))+$', re.IGNORECASE
+    )
+    # Technology/tool compound names that should NOT be used as document topics
+    _TECH_NAME_BLOCKLIST = frozenset([
+        'docker compose', 'docker desktop', 'docker swarm', 'docker engine',
+        'visual studio', 'vs code', 'android studio', 'xcode',
+        'unreal engine', 'unity engine', 'godot engine', 'game maker',
+        'laravel forge', 'ruby rails',
+        'google cloud', 'amazon web', 'microsoft azure',
+        'open source', 'pull request', 'merge request',
+        'node modules', 'next js', 'nuxt js',
+    ])
+
     def _inject_context(self, facts: List[str], full_text: str) -> List[str]:
         """Prepend topic context to orphaned facts that lack a clear subject.
 
         Detects the main topic (e.g., project name) from the text header,
         then enriches facts that don't mention it or any proper noun.
         Zero LLM cost — pure heuristic.
+
+        Only activates for longer texts (>200 chars) where facts are likely
+        to be orphaned. Short texts (personal info, preferences) are already
+        self-contained and don't need context injection.
         """
-        # Step 1: detect topic from first ~500 chars
-        header = full_text[:500]
+        # Short texts don't need context injection — they're self-contained.
+        # Multi-sentence personal info (under ~300 chars) is still self-contained.
+        # Context injection is for long documents where facts lose their parent topic.
+        if len(full_text) < 300:
+            return facts
+
+        # Step 1: detect topic from the opening of the text only.
+        # A document topic appears near the start: "Echoes of the Fallen is a..."
+        # Scanning further picks up list items (e.g., "Dead Cells" in a game list).
+        # Use the shorter of: first sentence/line or first 100 chars.
+        first_break = len(full_text)
+        for sep in ['\n', '. ', '! ', '? ']:
+            pos = full_text.find(sep)
+            if 0 < pos < first_break:
+                first_break = pos
+        header = full_text[:min(first_break + 1, 80)]
         topic = None
         for match in self._TOPIC_RE.finditer(header):
             candidate = match.group(1).strip()
+            # Strip trailing prepositions (e.g., "Docker on Windows with" → "Docker on Windows")
+            candidate = self._TRAILING_PREP_RE.sub('', candidate).strip()
             words = candidate.split()
-            # Must be 2+ words, not a common sentence opener
+            # Must be 2+ words, not a common sentence opener, not a tech name
             if len(words) >= 2 and not candidate.startswith(('The ', 'A ', 'An ', 'This ', 'That ')):
-                topic = candidate
-                break
+                if candidate.lower() not in self._TECH_NAME_BLOCKLIST:
+                    topic = candidate
+                    break
 
         if not topic:
+            return facts
+
+        # Multi-topic detection: if the text contains many distinct proper names,
+        # it's a list/survey — not a document about one topic. Skip injection.
+        all_names = set()
+        for m in self._TOPIC_RE.finditer(full_text[:800]):
+            name = self._TRAILING_PREP_RE.sub('', m.group(1).strip()).strip()
+            if len(name.split()) >= 2:
+                all_names.add(name.lower())
+        if len(all_names) >= 4:
             return facts
 
         topic_lower = topic.lower()
