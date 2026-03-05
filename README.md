@@ -448,6 +448,17 @@ Embedding model comparison (qwen3-embedding):
 
 All data survives container restarts and redeployments.
 
+## Roadmap
+
+Planned features (not yet implemented):
+
+- **JSON Export/Import** — `GET /api/v1/memories/export` dumps all memories as portable JSON
+  (text + timestamps + categories). `POST /api/v1/memories/import` re-ingests via `smart_add`
+  pipeline (auto-embeds, deduplicates, rebuilds graph). Enables model migration: switch
+  embedding model, re-import, and all vectors + graph nodes are regenerated.
+- **MCP export/import tools** — `export_memories` and `import_memories` for Claude Code / MCP clients
+- **Async import with progress** — large imports (hundreds of memories) with status tracking
+
 ## License
 
 Apache 2.0 — same as upstream. See [LICENSE](LICENSE).
