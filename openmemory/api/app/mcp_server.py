@@ -312,6 +312,29 @@ async def delete_memories(memory_ids: list[str]) -> str:
             if not ids_to_delete:
                 return "Error: No accessible memories found with provided IDs"
 
+            # Capture content and find related memories before deleting
+            deleted_items = []
+            related_memories = []
+            for memory_id in ids_to_delete:
+                memory = db.query(Memory).filter(Memory.id == memory_id).first()
+                content = memory.content if memory else ""
+                deleted_items.append({"id": str(memory_id), "memory": content[:200]})
+
+                # Find related memories (advanced mode)
+                if content:
+                    try:
+                        related = enhanced_memory_manager.hybrid_search(content, uid, limit=5)
+                        for r in related:
+                            if r.id != str(memory_id):
+                                related_memories.append({
+                                    "id": r.id,
+                                    "memory": r.content[:200],
+                                    "score": round(r.score, 3),
+                                    "source": r.source,
+                                })
+                    except Exception:
+                        pass
+
             # Delete from vector store
             for memory_id in ids_to_delete:
                 try:
@@ -324,30 +347,39 @@ async def delete_memories(memory_ids: list[str]) -> str:
             for memory_id in ids_to_delete:
                 memory = db.query(Memory).filter(Memory.id == memory_id).first()
                 if memory:
-                    # Update memory state
                     memory.state = MemoryState.deleted
                     memory.deleted_at = now
 
-                    # Create history entry
-                    history = MemoryStatusHistory(
+                    db.add(MemoryStatusHistory(
                         memory_id=memory_id,
                         changed_by=user.id,
                         old_state=MemoryState.active,
                         new_state=MemoryState.deleted
-                    )
-                    db.add(history)
-
-                    # Create access log entry
-                    access_log = MemoryAccessLog(
+                    ))
+                    db.add(MemoryAccessLog(
                         memory_id=memory_id,
                         app_id=app.id,
                         access_type="delete",
                         metadata_={"operation": "delete_by_id"}
-                    )
-                    db.add(access_log)
+                    ))
 
             db.commit()
-            return f"Successfully deleted {len(ids_to_delete)} memories"
+
+            # Build response with context for AI
+            seen_ids = {d["id"] for d in deleted_items}
+            unique_related = []
+            for r in related_memories:
+                if r["id"] not in seen_ids:
+                    seen_ids.add(r["id"])
+                    unique_related.append(r)
+
+            result = json.dumps({
+                "status": "success",
+                "message": f"Deleted {len(ids_to_delete)} memories.",
+                "deleted": deleted_items,
+                "related_memories": unique_related[:10],
+            })
+            return result
         finally:
             db.close()
     except Exception as e:
