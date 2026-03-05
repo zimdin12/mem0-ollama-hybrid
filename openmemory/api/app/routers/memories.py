@@ -17,6 +17,7 @@ from app.models import (
 )
 from app.schemas import MemoryResponse
 from app.utils.memory import get_memory_client
+from app.utils.enhanced_memory import enhanced_memory_manager
 from app.utils.permissions import check_memory_access_permissions
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi_pagination import Page, Params
@@ -261,6 +262,70 @@ async def get_categories(
     }
 
 
+def _is_advanced_mode() -> bool:
+    return os.environ.get("MEMORY_MODE", "advanced").lower() == "advanced"
+
+
+class SearchMemoriesRequest(BaseModel):
+    query: str
+    user_id: str
+    limit: int = 10
+
+
+@router.post("/search")
+async def search_memories_hybrid(
+    request: SearchMemoriesRequest,
+    db: Session = Depends(get_db)
+):
+    user = db.query(User).filter(User.user_id == request.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if _is_advanced_mode():
+        results = enhanced_memory_manager.hybrid_search(
+            request.query, request.user_id, limit=request.limit
+        )
+        sources_used = list(set(r.source for r in results))
+        return {
+            "query": request.query,
+            "results": [
+                {
+                    "id": r.id,
+                    "memory": r.content,
+                    "score": round(r.score, 3),
+                    "source": r.source,
+                    "created_at": r.created_at.isoformat() if hasattr(r.created_at, 'isoformat') else r.created_at,
+                }
+                for r in results
+            ],
+            "total": len(results),
+            "sources_used": sources_used,
+        }
+    else:
+        # Simple mode: SQLite text search
+        query = db.query(Memory).filter(
+            Memory.user_id == user.id,
+            Memory.state != MemoryState.deleted,
+            Memory.state != MemoryState.archived,
+            Memory.content.ilike(f"%{request.query}%"),
+        ).limit(request.limit).all()
+        return {
+            "query": request.query,
+            "results": [
+                {
+                    "id": str(m.id),
+                    "memory": m.content,
+                    "score": 1.0,
+                    "source": "sqlite",
+                    "created_at": m.created_at.isoformat() if m.created_at else None,
+                }
+                for m in query
+            ],
+            "total": len(query),
+            "sources_used": ["sqlite"],
+        }
+
+
 class CreateMemoryRequest(BaseModel):
     user_id: str
     text: Optional[str] = None
@@ -310,7 +375,70 @@ async def create_memory(
 
     logging.info(f"Creating memory for user_id: {request.user_id} with app: {request.app}")
 
-    # Step 1: Get memory client
+    # Advanced mode: use enhanced smart_add with dedup, fact splitting, async graph
+    if _is_advanced_mode():
+        try:
+            add_result = enhanced_memory_manager.smart_add_memory(
+                request.text,
+                request.user_id,
+                metadata={"source_app": "openmemory", "mcp_client": request.app, **(request.metadata or {})},
+            )
+        except Exception as add_error:
+            logging.error(f"smart_add_memory failed: {add_error}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Memory extraction failed: {str(add_error)}")
+
+        # Sync added memories to SQLite
+        created_memories = []
+        results_output = []
+        processed_ids: Set[str] = set()
+        for result in add_result.added_memories:
+            result_id = result.get("id")
+            if not result_id or str(result_id) in processed_ids:
+                continue
+            processed_ids.add(str(result_id))
+            memory_id = UUID(result_id) if isinstance(result_id, str) else result_id
+            memory_text = result.get("memory", "")
+            event = result.get("event", "ADD")
+
+            existing_memory = db.query(Memory).filter(Memory.id == memory_id).first()
+            if existing_memory:
+                existing_memory.state = MemoryState.active
+                existing_memory.content = memory_text
+                memory_obj = existing_memory
+            else:
+                memory_obj = Memory(
+                    id=memory_id, user_id=user.id, app_id=app_obj.id,
+                    content=memory_text, metadata_=request.metadata, state=MemoryState.active,
+                )
+                db.add(memory_obj)
+
+            db.add(MemoryStatusHistory(
+                memory_id=memory_id, changed_by=user.id,
+                old_state=MemoryState.active, new_state=MemoryState.active,
+            ))
+            created_memories.append(memory_obj)
+            results_output.append({"id": str(memory_id), "memory": memory_text, "event": event})
+
+        db.commit()
+        for m in created_memories:
+            db.refresh(m)
+
+        response = {
+            "results": results_output,
+            "count": len(results_output),
+            "status": add_result.status,
+            "skipped_duplicates": len(add_result.skipped_facts),
+            "related_memories": [
+                {"id": r.get("id", ""), "memory": r.get("content", "")[:200], "score": round(r.get("score", 0), 3)}
+                for r in add_result.related_memories[:5]
+            ],
+            "summary": add_result.summary,
+        }
+        return response
+
+    # Simple mode: raw mem0 add
     try:
         memory_client = get_memory_client()
         if not memory_client:
@@ -319,30 +447,21 @@ async def create_memory(
         logging.warning(f"Memory client unavailable: {client_error}.")
         raise HTTPException(status_code=503, detail=f"Memory service unavailable: {str(client_error)}")
 
-    # Step 2: Call mem0 add()
     qdrant_response = None
     try:
         qdrant_response = memory_client.add(
             request.text,
             user_id=request.user_id,
-            metadata={
-                "source_app": "openmemory",
-                "mcp_client": request.app,
-            },
-            infer=request.infer
+            metadata={"source_app": "openmemory", "mcp_client": request.app},
+            infer=request.infer,
         )
         logging.info(f"Memory add response: {qdrant_response}")
-
-        if isinstance(qdrant_response, dict) and 'relations' in qdrant_response:
-            logging.info(f"Graph relations: {qdrant_response['relations']}")
-
     except Exception as add_error:
         logging.error(f"memory_client.add() failed: {add_error}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Memory extraction failed: {str(add_error)}")
 
-    # Step 3: Process results - create SQLite entries for each ADD/UPDATE
     created_memories = []
     results_output = []
     processed_ids: Set[str] = set()
@@ -351,7 +470,6 @@ async def create_memory(
         for result in qdrant_response['results']:
             event = result.get('event', 'NONE')
 
-            # Handle DELETE events — mem0 already removed the vector from Qdrant, sync SQLite
             if event == 'DELETE':
                 result_id = result.get('id')
                 if result_id:
@@ -366,7 +484,6 @@ async def create_memory(
                 continue
 
             if event not in ('ADD', 'UPDATE'):
-                logging.info(f"Skipping result with event={event}: {result.get('id', 'no-id')}")
                 continue
 
             result_id = result.get('id')
@@ -380,49 +497,29 @@ async def create_memory(
             processed_ids.add(id_str)
 
             memory_text = result.get('memory', request.text)
-
             existing_memory = db.query(Memory).filter(Memory.id == memory_id).first()
             if existing_memory:
-                old_state = existing_memory.state
                 existing_memory.state = MemoryState.active
                 existing_memory.content = memory_text
                 memory = existing_memory
             else:
-                old_state = None
                 memory = Memory(
-                    id=memory_id,
-                    user_id=user.id,
-                    app_id=app_obj.id,
-                    content=memory_text,
-                    metadata_=request.metadata,
-                    state=MemoryState.active
+                    id=memory_id, user_id=user.id, app_id=app_obj.id,
+                    content=memory_text, metadata_=request.metadata, state=MemoryState.active,
                 )
                 db.add(memory)
 
-            history = MemoryStatusHistory(
-                memory_id=memory_id,
-                changed_by=user.id,
-                old_state=old_state if old_state else MemoryState.active,
-                new_state=MemoryState.active
-            )
-            db.add(history)
-
+            db.add(MemoryStatusHistory(
+                memory_id=memory_id, changed_by=user.id,
+                old_state=MemoryState.active, new_state=MemoryState.active,
+            ))
             created_memories.append(memory)
-            results_output.append({
-                "id": id_str,
-                "memory": memory_text,
-                "event": event,
-            })
+            results_output.append({"id": id_str, "memory": memory_text, "event": event})
 
-    if not created_memories:
-        logging.info("No new memories added (all facts already known or no facts extracted)")
-
-    # Step 4: Commit and return consistent response
     db.commit()
     for memory in created_memories:
         db.refresh(memory)
 
-    logging.info(f"create_memory complete: {len(created_memories)} memories saved to SQLite")
     return {"results": results_output, "count": len(results_output)}
 
 
@@ -475,33 +572,67 @@ async def delete_memories(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Get memory client to delete from vector store
     try:
         memory_client = get_memory_client()
         if not memory_client:
-            raise HTTPException(
-                status_code=503,
-                detail="Memory client is not available"
-            )
+            raise HTTPException(status_code=503, detail="Memory client is not available")
     except HTTPException:
         raise
     except Exception as client_error:
-        logging.error(f"Memory client initialization failed: {client_error}")
-        raise HTTPException(
-            status_code=503,
-            detail=f"Memory service unavailable: {str(client_error)}"
-        )
+        raise HTTPException(status_code=503, detail=f"Memory service unavailable: {str(client_error)}")
 
-    # Delete from vector store then mark as deleted in database
+    deleted_items = []
+    related_memories = []
+
     for memory_id in request.memory_ids:
+        # Capture content before deletion (for AI context)
+        memory_obj = db.query(Memory).filter(Memory.id == memory_id).first()
+        deleted_content = memory_obj.content if memory_obj else ""
+
+        # In advanced mode, find related memories before deleting
+        if _is_advanced_mode() and deleted_content:
+            try:
+                related = enhanced_memory_manager.hybrid_search(
+                    deleted_content, request.user_id, limit=5
+                )
+                for r in related:
+                    if r.id != str(memory_id):
+                        related_memories.append({
+                            "id": r.id,
+                            "memory": r.content[:200],
+                            "score": round(r.score, 3),
+                            "source": r.source,
+                            "relationship": "similar content",
+                        })
+            except Exception as e:
+                logging.warning(f"Failed to find related memories for {memory_id}: {e}")
+
+        # Delete from vector store
         try:
             memory_client.delete(memory_id=str(memory_id), user_id=request.user_id)
         except Exception as delete_error:
             logging.warning(f"Failed to delete memory {memory_id} from vector store: {delete_error}")
 
         update_memory_state(db, memory_id, MemoryState.deleted, user.id)
+        deleted_items.append({"id": str(memory_id), "memory": deleted_content[:200]})
 
-    return {"message": f"Successfully deleted {len(request.memory_ids)} memories"}
+    # Deduplicate related memories (may overlap across deleted items)
+    seen_ids = {d["id"] for d in deleted_items}
+    unique_related = []
+    for r in related_memories:
+        if r["id"] not in seen_ids:
+            seen_ids.add(r["id"])
+            unique_related.append(r)
+
+    response = {
+        "message": f"Deleted {len(request.memory_ids)} memories.",
+        "deleted": deleted_items,
+    }
+    if unique_related:
+        response["related_memories"] = unique_related[:10]
+        response["message"] += f" Found {len(unique_related)} related memories that may also need attention."
+
+    return response
 
 
 @router.post("/actions/archive")

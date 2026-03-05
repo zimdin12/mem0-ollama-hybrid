@@ -1,28 +1,31 @@
 ---
 name: openmemory
-description: Hybrid memory system (vector + graph). Use when recalling facts, storing preferences, or exploring entity relationships via mem_search, mem_store, mem_forget, mem_related tools.
+description: Hybrid memory system (vector + graph + temporal). Use search_memory, add_memories, delete_memories, get_related_memories tools to recall, store, and explore persistent knowledge.
 ---
 
 # OpenMemory — Hybrid Memory System
 
-You have access to a persistent hybrid memory system (vector search + knowledge graph) via MCP tools. Use it to remember and recall information across sessions.
+You have access to a persistent hybrid memory system via MCP tools. It combines vector search (semantic similarity), graph traversal (entity relationships), and temporal context (recency) to provide rich recall.
 
-## Available Tools
+## Available MCP Tools
 
 | Tool | When to use |
 |------|------------|
-| `mem_search` | Recall facts, preferences, past decisions, people, projects, or any previously stored context |
-| `mem_store` | Save important facts, preferences, project decisions, or anything worth remembering |
-| `mem_forget` | Delete a memory that is outdated, incorrect, or no longer relevant |
-| `mem_related` | Explore connections between people, projects, and concepts via graph traversal |
+| `search_memory` | Recall facts, preferences, decisions, people, projects — any previously stored context |
+| `add_memories` | Save important facts, preferences, project decisions, or anything worth remembering |
+| `delete_memories` | Delete outdated or incorrect memories by ID |
+| `delete_all_memories` | Wipe all memories for the user (use with extreme caution) |
+| `get_related_memories` | Explore connections between entities via graph traversal |
+| `list_memories` | List all stored memories with optional filtering |
+| `handle_conversation` | Process a user+assistant message pair and extract memorable content |
 
 ## Auto-Recall (start of conversation)
 
 At the **start of every conversation**, search memory for context relevant to the current task:
 
-1. If the user mentions a project, person, or topic — `mem_search` for it
-2. If working in a specific codebase — `mem_search` for the project name or directory
-3. If the user references a past decision or preference — `mem_search` before assuming
+1. If the user mentions a project, person, or topic — `search_memory` for it
+2. If working in a specific codebase — `search_memory` for the project name or directory
+3. If the user references a past decision or preference — `search_memory` before assuming
 
 Keep searches focused. One or two targeted queries are better than broad sweeps.
 
@@ -55,16 +58,25 @@ Write memories as **concise, self-contained facts**. Each memory should make sen
 
 When the user corrects a previous fact or preference:
 
-1. `mem_search` to find the outdated memory
-2. `mem_forget` the old one (by ID from search results)
-3. `mem_store` the corrected version
+1. `search_memory` to find the outdated memory
+2. `delete_memories` the old one (by ID from search results)
+3. `add_memories` the corrected version
 
-mem0 has built-in deduplication, but explicit forget + store is more reliable for corrections.
+The system has built-in deduplication, but explicit delete + add is more reliable for corrections.
 
 ## Graph Traversal
 
-Use `mem_related` when exploring connections:
+Use `get_related_memories` when exploring connections:
 
-- "What do we know about Steven?" → `mem_related` with entity "Steven"
-- "What tools are used in this project?" → `mem_related` with project name
-- Following up on a search result that mentions an entity → `mem_related` to see its connections
+- "What do we know about Steven?" → `get_related_memories` with entity "Steven"
+- "What tools are used in this project?" → `get_related_memories` with project name
+- Following up on a search result that mentions an entity → explore its connections
+
+## Search Results
+
+Search results include:
+- **Score**: relevance percentage (higher = more relevant)
+- **Source**: where the result came from (vector, graph, or temporal)
+- **ID**: use this for deletion or follow-up queries
+
+Results are ranked by a hybrid of semantic similarity, graph relationships, and recency.
