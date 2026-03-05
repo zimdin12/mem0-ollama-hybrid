@@ -574,22 +574,7 @@ class EnhancedMemoryManager:
         if not topic:
             return facts
 
-        # Multi-topic detection: if the text contains many distinct proper names,
-        # it's a list/survey — not a document about one topic. Skip injection.
-        all_names = set()
-        for m in self._TOPIC_RE.finditer(full_text[:800]):
-            name = self._TRAILING_PREP_RE.sub('', m.group(1).strip()).strip()
-            if len(name.split()) >= 2:
-                all_names.add(name.lower())
-        if len(all_names) >= 4:
-            return facts
-
         topic_lower = topic.lower()
-        # Build set of known proper nouns (names that aren't the topic itself)
-        # These are entities that provide their own context
-        _KNOWN_NAMES = {'steven', 'valheim', 'subnautica', 'hades', 'dead cells',
-                        'bioprototype', 'blender', 'magicavoxel', 'qubicle',
-                        'tom looman', 'unreal engine', 'ue5', 'neo4j', 'docker'}
 
         enriched = []
         for fact in facts:
@@ -598,8 +583,14 @@ class EnhancedMemoryManager:
             if topic_lower in fact_lower:
                 enriched.append(fact)
                 continue
-            # Contains a known proper noun that provides its own context?
-            if any(name in fact_lower for name in _KNOWN_NAMES):
+            # Contains a multi-word proper noun (e.g., "Unreal Engine", "Dark Souls")?
+            # These facts already have their own context — no need to inject.
+            # This is generic: works for any user, not just hardcoded names.
+            has_proper_name = any(
+                len(m.group(1).split()) >= 2
+                for m in self._TOPIC_RE.finditer(fact)
+            )
+            if has_proper_name:
                 enriched.append(fact)
                 continue
             # Fact lacks context — prepend topic

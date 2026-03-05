@@ -64,7 +64,8 @@ Graph results scored at 0.65 (vs vector 0.5-0.85) to provide context without dom
   - Scans only first 80 chars / first sentence for topic (avoids picking list items as topics)
   - Strips trailing prepositions from topic candidates ("Docker on Windows with" → rejected)
   - Tech name blocklist prevents tools/frameworks being used as document topics
-  - Multi-topic detection: skips injection when 4+ distinct proper names found (list/survey text)
+  - Facts with existing multi-word proper nouns (e.g., "Unreal Engine") keep their own context
+  - No hardcoded user/entity names — uses generic proper noun detection
 - Checks each fact against Qdrant for semantic duplicates (threshold ≥ 0.85)
 - Stores each fact individually with `infer=False, graph=False` (no LLM re-extraction)
 - Graph extraction runs in **background thread**, chunked for long texts (~2000 chars/chunk)

@@ -371,25 +371,28 @@ curl "http://localhost:8765/api/v1/memories/graph/context/Steven?user_id=steven"
 
 ## How This Fork Differs from Upstream
 
-Upstream mem0 defaults to OpenAI for everything. This fork replaces all cloud dependencies with local Ollama equivalents.
+Upstream mem0 defaults to OpenAI for everything. This fork replaces all cloud dependencies with local Ollama equivalents and adds significant quality improvements.
 
 ### Key Changes
 
 | Area | Upstream | This Fork |
 |------|----------|-----------|
-| LLM | OpenAI GPT-4 | Ollama (qwen3:4b-instruct) |
-| Embeddings | OpenAI ada-002 | Ollama (qwen3-embedding:0.6b, 1024d) |
+| LLM | OpenAI GPT-4 | Ollama (any model — default qwen3:4b-instruct) |
+| Embeddings | OpenAI ada-002 | Ollama (any embedding model — default qwen3-embedding:0.6b, 1024d) |
 | Config | Hardcoded OpenAI keys | Environment variables (cascade: config.json → env) |
 | Categorization | OpenAI structured output | Ollama + manual JSON parsing |
-| Graph extraction | GPT-4 tool calling (3-4 LLM calls) | Single Ollama JSON mode call (`format:'json'`) |
-| Fact extraction | Naive sentence splitting | Protected splitting (preserves file extensions, versions, paths) |
-| Prompts | Verbose (for GPT-4) | Concise, directive (for 4B models) |
+| Graph extraction | GPT-4 tool calling (3-4 LLM calls) | Single Ollama JSON mode call (`format:'json'`), 11 entity types, hierarchy rules |
+| Fact extraction | Naive sentence splitting | Protected splitting (preserves file extensions, versions, paths), min 35 chars |
+| Context preservation | None | Auto-detects document topic, prepends to orphaned facts (e.g., "Total dev time 18 months" → "Echoes of the Fallen: Total dev time 18 months") |
+| Prompts | Verbose (for GPT-4) | Concise, directive (works with 4B+ models) |
 | Memory search | Vector only | Hybrid: vector + graph + temporal (interleaved 60/30/10) |
-| Memory addition | Synchronous, per-fact graph | Async graph extraction in background thread (5x faster) |
-| Memory deletion | Returns count only | Smart delete: returns deleted content + related memories |
-| Deduplication | Basic | Three-layer: cosine ≥ 0.95, vector ≥ 0.85, infer=False |
+| Memory addition | Synchronous, per-fact graph | Async chunked graph extraction in background thread (5x faster) |
+| Memory deletion | Returns count only | Smart delete: returns deleted content + related memories for cascade |
+| Deduplication | Basic | Three-layer: cosine ≥ 0.95 (main.py), vector ≥ 0.85 (enhanced), infer=False |
+| Graph quality | Relies on GPT-4 tool calls | JSON extraction with entity blocklist, fuzzy self-ref filter, element-ID guard |
+| Self-referential edges | Possible | Prevented: fuzzy name matching + Neo4j element-ID comparison |
 | REST API | Basic endpoints | `MEMORY_MODE` switch: `advanced` uses hybrid search/smart add/delete |
-| MCP tools | Basic (4 tools) | Enhanced (7 tools: hybrid search, smart add, graph traversal) |
+| MCP tools | Basic (4 tools) | Enhanced (7 tools: hybrid search, smart add, graph traversal, smart delete) |
 | MCP permissions | Filters out graph results | Correctly passes graph/temporal results through |
 | `Memory.add()` | No control over graph | Added `graph=False` parameter for per-fact control |
 
@@ -397,28 +400,29 @@ Upstream mem0 defaults to OpenAI for everything. This fork replaces all cloud de
 
 | File | Purpose |
 |------|---------|
-| `openmemory/api/app/utils/enhanced_memory.py` | Hybrid search, smart dedup, async graph extraction |
-| `openmemory/api/fix_graph_entity_parsing.py` | JSON-based graph extraction (replaces tool calling) |
-| `openmemory/api/custom_update_prompt.py` | Optimized prompts for qwen3:4b |
+| `openmemory/api/app/utils/enhanced_memory.py` | Hybrid search, smart dedup, context injection, async graph extraction |
+| `openmemory/api/fix_graph_entity_parsing.py` | JSON-based graph extraction with 11 entity types and hierarchy rules |
+| `openmemory/api/custom_update_prompt.py` | Context-preserving prompts optimized for small models |
 | `openmemory/docker-compose.override.yml` | Neo4j + Qdrant init + networking |
 | `openmemory/init-qdrant.sh` | Pre-create Qdrant collection (1024d cosine) |
 | `mcp-server/server.js` | Standalone MCP server (4 tools, stdio transport) |
 | `mcp-server/SKILL.md` | Claude Code skill for auto-recall/capture behavior |
 | `test_memory_system.py` | 5-phase test suite (insert, validate, graph, search, dedup) |
+| `TESTING_GUIDE.md` | Comprehensive testing checklist for extraction pipeline changes |
 
 ### Files Modified
 
 | File | Change |
 |------|--------|
-| `openmemory/api/app/utils/memory.py` | Ollama compatibility, env-based config, graph store |
-| `openmemory/api/app/utils/categorization.py` | OpenAI → Ollama |
-| `openmemory/api/app/mcp_server.py` | Enhanced memory manager, graph/temporal filter fix |
-| `openmemory/api/app/routers/memories.py` | Graph endpoints, DELETE sync, no phantoms |
+| `openmemory/api/app/utils/memory.py` | Ollama compatibility, env-based config, Docker host detection |
+| `openmemory/api/app/utils/categorization.py` | OpenAI → Ollama with JSON fallback parsing |
+| `openmemory/api/app/mcp_server.py` | Enhanced memory manager, 7 tools, permission filter fix |
+| `openmemory/api/app/routers/memories.py` | MEMORY_MODE, POST /search, smart add/delete, 7 graph endpoints |
 | `openmemory/api/app/routers/config.py` | Env-based defaults, no auto-create DB rows |
 | `openmemory/api/app/database.py` | SQLite path fix for Docker volume persistence |
 | `openmemory/api/config.json` | Env var references for all providers |
-| `mem0/memory/main.py` | Added `graph=False` parameter to `Memory.add()` |
-| `mem0/memory/graph_memory.py` | Entity list bug fix, tech entity types |
+| `mem0/memory/main.py` | `graph=False` parameter, self-ref guards |
+| `mem0/memory/graph_memory.py` | Entity list bug fix, element-ID self-ref guard |
 
 For the full technical changelog, see [FORK_CHANGES.md](FORK_CHANGES.md).
 
