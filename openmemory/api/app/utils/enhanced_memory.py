@@ -206,7 +206,9 @@ class EnhancedMemoryManager:
         
         # 2. Extract facts from new text
         new_facts = self._extract_facts(text)
-        
+        # 2b. Inject topic context into orphaned facts
+        new_facts = self._inject_context(new_facts, text)
+
         # 3. Compare with existing facts
         existing_facts = []
         for memory in existing_memories:
@@ -237,16 +239,42 @@ class EnhancedMemoryManager:
                 except Exception as e:
                     logging.warning(f"Failed to add fact '{fact[:50]}': {e}")
 
-            # 6. Single graph extraction call with the FULL original text
-            #    Runs in background thread — graph extraction is ~3s but non-critical
-            #    for the immediate response (vector results are already stored)
+            # 6. Graph extraction — chunk long texts to avoid overwhelming the LLM
+            #    Runs in background thread — graph extraction is ~3s per chunk
             def _background_graph_extract(mem_client, full_text, uid):
                 try:
-                    graph_result = mem_client._add_to_graph(
-                        [{"role": "user", "content": full_text}],
-                        {"user_id": uid},
-                    )
-                    logging.info(f"Graph extraction completed: {graph_result}")
+                    # Split long texts into chunks (~2000 chars each)
+                    # so the LLM can extract entities/relationships reliably
+                    max_chunk = 2000
+                    if len(full_text) <= max_chunk:
+                        chunks = [full_text]
+                    else:
+                        # Split on paragraph boundaries
+                        paragraphs = re.split(r'\n\n+', full_text)
+                        chunks = []
+                        current = ""
+                        for para in paragraphs:
+                            if len(current) + len(para) > max_chunk and current:
+                                chunks.append(current.strip())
+                                current = para
+                            else:
+                                current = current + "\n\n" + para if current else para
+                        if current.strip():
+                            chunks.append(current.strip())
+
+                    total_added = []
+                    for i, chunk in enumerate(chunks):
+                        try:
+                            result = mem_client._add_to_graph(
+                                [{"role": "user", "content": chunk}],
+                                {"user_id": uid},
+                            )
+                            added = result.get('added_entities', [])
+                            total_added.extend(added)
+                            logging.info(f"Graph chunk {i+1}/{len(chunks)}: {len(added)} entities added")
+                        except Exception as e:
+                            logging.warning(f"Graph chunk {i+1}/{len(chunks)} failed: {e}")
+                    logging.info(f"Graph extraction completed: {len(chunks)} chunks, {len(total_added)} total entities")
                 except Exception as e:
                     logging.warning(f"Graph extraction failed (non-fatal): {e}")
 
@@ -432,24 +460,106 @@ class EnhancedMemoryManager:
             lambda m: m.group().replace('.', self._PLACEHOLDER), protected
         )
 
-        # 2. Split on actual sentence boundaries
-        sentences = re.split(r'(?<=[.!?])\s+', protected)
+        # 2. Split on multiple boundary types:
+        #    - Newlines (handles bullets, headers, structured docs)
+        #    - Sentence endings (. ! ?) followed by space
+        #    - Bullet markers (* -)
+        # First split on newlines
+        lines = re.split(r'\n+', protected)
+        # Then split each line on sentence boundaries
+        raw_segments = []
+        for line in lines:
+            segments = re.split(r'(?<=[.!?])\s+', line)
+            raw_segments.extend(segments)
 
         # 3. Restore protected dots and validate
         facts = []
-        for s in sentences:
+        for s in raw_segments:
             restored = s.replace(self._PLACEHOLDER, '.').strip()
             # Strip trailing punctuation for cleaner facts
             restored = restored.rstrip('.!? ')
-            if not restored or len(restored) < 20:
+            # Strip leading bullet markers and numbering
+            restored = re.sub(r'^[\*\-\u2022]+\s*', '', restored).strip()
+            restored = re.sub(r'^\d+[\.\)]\s*', '', restored).strip()
+            if not restored or len(restored) < 40:
                 continue
             # Reject fragments starting with orphaned extensions/lowercase
             if re.match(r'^[a-z]{1,4}[)\]\s,]', restored):
                 continue
+            # Reject section headers and labels (e.g., "Pre-Production (Months 3-4):")
+            if restored.endswith(':') and len(restored) < 80:
+                continue
+            # Reject pure labels/titles (short, no verb-like content)
+            if len(restored) < 60 and not any(c in restored for c in '.,$'):
+                words = restored.split()
+                # If most words are capitalized, it's a header
+                cap_words = sum(1 for w in words if w[0].isupper()) if words else 0
+                if cap_words >= len(words) * 0.7:
+                    continue
             facts.append(restored)
 
         return facts
-    
+
+    # Pattern to find capitalized multi-word phrases (project/person names)
+    # Matches: "Echoes of the Fallen", "Dead Cells", "Voxel Plugin Legacy"
+    _TOPIC_RE = re.compile(
+        r'\b([A-Z][a-z]+'
+        r'(?:\s+(?:of|the|and|in|on|for|to|with|a|an)\b)*'
+        r'(?:\s+[A-Z][a-z]+'
+        r'(?:\s+(?:of|the|and|in|on|for|to|with|a|an)\b)*)*)'
+    )
+    # Starters that indicate orphaned facts (no clear subject)
+    _ORPHAN_STARTERS_RE = re.compile(
+        r'^(?:Total|The|A|An|It|This|That|Each|Every|All|'
+        r'Primary|Secondary|Core|Main|Basic|Full|'
+        r'Budget|Phase|Risk|Strategy|Implementation|'
+        r'\d)',
+        re.IGNORECASE
+    )
+
+    def _inject_context(self, facts: List[str], full_text: str) -> List[str]:
+        """Prepend topic context to orphaned facts that lack a clear subject.
+
+        Detects the main topic (e.g., project name) from the text header,
+        then enriches facts that don't mention it or any proper noun.
+        Zero LLM cost — pure heuristic.
+        """
+        # Step 1: detect topic from first ~500 chars
+        header = full_text[:500]
+        topic = None
+        for match in self._TOPIC_RE.finditer(header):
+            candidate = match.group(1).strip()
+            words = candidate.split()
+            # Must be 2+ words, not a common sentence opener
+            if len(words) >= 2 and not candidate.startswith(('The ', 'A ', 'An ', 'This ', 'That ')):
+                topic = candidate
+                break
+
+        if not topic:
+            return facts
+
+        topic_lower = topic.lower()
+        # Build set of known proper nouns (names that aren't the topic itself)
+        # These are entities that provide their own context
+        _KNOWN_NAMES = {'steven', 'valheim', 'subnautica', 'hades', 'dead cells',
+                        'bioprototype', 'blender', 'magicavoxel', 'qubicle',
+                        'tom looman', 'unreal engine', 'ue5', 'neo4j', 'docker'}
+
+        enriched = []
+        for fact in facts:
+            fact_lower = fact.lower()
+            # Already contains the topic?
+            if topic_lower in fact_lower:
+                enriched.append(fact)
+                continue
+            # Contains a known proper noun that provides its own context?
+            if any(name in fact_lower for name in _KNOWN_NAMES):
+                enriched.append(fact)
+                continue
+            # Fact lacks context — prepend topic
+            enriched.append(f"{topic}: {fact}")
+        return enriched
+
     def _find_novel_facts(self, new_facts: List[str], existing_facts: List[str], user_id: str = None) -> List[str]:
         """Identify facts that are truly new using Qdrant vector similarity"""
         if not self.memory_client:

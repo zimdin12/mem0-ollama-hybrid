@@ -524,6 +524,13 @@ class MemoryGraph:
                     params["run_id"] = run_id
 
             elif source_node_search_result and destination_node_search_result:
+                # Guard: skip if both names resolved to the same physical node
+                source_element_id = source_node_search_result[0]["elementId(source_candidate)"]
+                dest_element_id = destination_node_search_result[0]["elementId(destination_candidate)"]
+                if source_element_id == dest_element_id:
+                    logger.info(f"Skipping self-referential edge (same node): {source} -> {destination}")
+                    continue
+
                 cypher = f"""
                 MATCH (source)
                 WHERE elementId(source) = $source_id
@@ -533,7 +540,7 @@ class MemoryGraph:
                 WHERE elementId(destination) = $destination_id
                 SET destination.mentions = coalesce(destination.mentions, 0) + 1
                 MERGE (source)-[r:{relationship}]->(destination)
-                ON CREATE SET 
+                ON CREATE SET
                     r.created_at = timestamp(),
                     r.updated_at = timestamp(),
                     r.mentions = 1
@@ -542,8 +549,8 @@ class MemoryGraph:
                 """
 
                 params = {
-                    "source_id": source_node_search_result[0]["elementId(source_candidate)"],
-                    "destination_id": destination_node_search_result[0]["elementId(destination_candidate)"],
+                    "source_id": source_element_id,
+                    "destination_id": dest_element_id,
                     "user_id": user_id,
                 }
                 if agent_id:

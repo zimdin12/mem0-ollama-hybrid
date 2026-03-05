@@ -36,26 +36,64 @@ GRAPH_EXTRACTION_PROMPT = """Extract entities and relationships from text. Retur
 Output format:
 {"entities": [{"name": "...", "type": "..."}, ...], "relationships": [{"source": "...", "relation": "...", "target": "..."}, ...]}
 
-Entity types to use:
-- person (people, users, characters)
-- project (applications, games, products being built)
-- technology (languages, engines, protocols, libraries)
-- framework (specific frameworks like Laravel, React, UE5)
-- tool (software tools: MagicaVoxel, Blender, VS Code)
-- concept (game mechanics, design patterns, abstract ideas)
-- skill (abilities, competencies)
-- place (locations, environments, biomes)
-- organization (companies, teams)
-- phase (development phases, milestones, time periods)
+ENTITY TYPE RULES (use the MOST SPECIFIC type — "concept" is LAST RESORT):
+- "person": people, users, developers (steven, alice)
+- "project": games, applications, products being built (echoes of the fallen)
+- "technology": languages, engines, protocols (c++, unreal engine 5, http)
+- "framework": specific frameworks (laravel, react, godot)
+- "tool": software tools (magicavoxel, blender, vs code, voxel plugin)
+- "game_element": in-game mechanics, abilities, resources, systems (water magic, skill acquisition, chunk management, dual contouring, nanite)
+- "metric": numbers, targets, budgets, timelines (18 months, $50000 revenue, 80+ metacritic)
+- "phase": development phases, milestones (pre-production, alpha testing, phase 1)
+- "place": locations, real or in-game areas (home meadow, wilderness, exploration ring)
+- "organization": companies, teams, communities (indie developers, discord community)
+- "concept": ONLY for abstract ideas that fit NO other type above
+
+RELATIONSHIP RULES:
+- Connect entities to their PARENT: features/phases/metrics belong to their project
+- Use the person/user as a hub: "steven" develops projects, has skills, uses tools
+- Game elements connect to their project, NOT to each other randomly
+- Phases connect to their project: project has_phase phase
+- Metrics connect to their project: project has_target metric
+- DO NOT connect two entities that mean the same thing (e.g., "water" and "water magic")
+- DO NOT create circular relationships (A->B->A)
+
+RELATION VERBS:
+- develops, creates, builds (person -> project)
+- is_a, has_role (person -> role/skill)
+- uses, prefers, learning (person -> technology/tool)
+- features, contains, has_phase (project -> element/phase)
+- has_target, has_budget (project -> metric)
+- part_of, belongs_to (element -> project)
+- built_with, uses (project -> technology)
+- inspired_by (project -> project)
+- unlocks, enables (game_element -> game_element, within same project)
+
+EXAMPLE:
+Text: "Steven is a PHP developer building Echoes of the Fallen, a voxel roguelike. Total development time is 18 months. The game uses C++ and dual contouring for terrain. Phase 1 covers foundation work months 1-6."
+Output:
+{"entities": [
+  {"name": "steven", "type": "person"},
+  {"name": "echoes of the fallen", "type": "project"},
+  {"name": "php", "type": "technology"},
+  {"name": "c++", "type": "technology"},
+  {"name": "dual contouring", "type": "game_element"},
+  {"name": "18 months development", "type": "metric"},
+  {"name": "phase 1 foundation", "type": "phase"}
+], "relationships": [
+  {"source": "steven", "relation": "is_a", "target": "php developer"},
+  {"source": "steven", "relation": "develops", "target": "echoes of the fallen"},
+  {"source": "echoes of the fallen", "relation": "built_with", "target": "c++"},
+  {"source": "echoes of the fallen", "relation": "features", "target": "dual contouring"},
+  {"source": "echoes of the fallen", "relation": "has_target", "target": "18 months development"},
+  {"source": "echoes of the fallen", "relation": "has_phase", "target": "phase 1 foundation"}
+]}
 
 Rules:
-- Keep entity names concise (2-4 words max)
-- Use lowercase for entity names
-- Do NOT create entities from file extensions (.php, .js, .py)
+- Keep entity names concise (2-4 words max), lowercase
+- Do NOT create entities from file extensions (.php, .js)
 - Do NOT create entities from generic words (utilities, default, record)
-- Every relationship must connect two entities that appear in the entities list
-- For self-references (I, me, my), use "USER_ID" as the entity name
-- Prefer specific relation verbs: uses, extends, contains, develops, creates, features, has, is_a, located_in, part_of, made_by, inspired_by"""
+- For self-references (I, me, my), use "USER_ID" as the entity name"""
 
 
 def _json_extract_graph(self, data, filters):
@@ -141,8 +179,12 @@ def _json_extract_graph(self, data, filters):
 
             if not source or not target or not relation:
                 continue
-            # Skip self-references
+            # Skip self-references (exact match)
             if source == target:
+                continue
+            # Skip fuzzy self-references (one contains the other)
+            if len(source) > 2 and len(target) > 2 and (source in target or target in source):
+                logger.info(f"Skipping fuzzy self-ref: {source} -> {target}")
                 continue
             # Skip blocked entities
             if source in _ENTITY_BLOCKLIST or target in _ENTITY_BLOCKLIST:

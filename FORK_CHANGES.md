@@ -20,10 +20,13 @@ reliably produce tool_calls — returns empty arrays, wrong arguments, or malfor
 - Entity blocklist filters file extensions (.php, .js) and generic words
 - Skips the delete step entirely (too unreliable with small LLMs)
 - Validates relationships (both source and target must exist in entity map)
-- Filters self-referential relationships
+- Filters self-referential relationships (exact + fuzzy containment check)
+- 11 entity types with "concept" as last resort (was defaulting to concept for everything)
+- Relationship hierarchy rules: projects connect to features/phases/tech, persons to skills
+- Concrete prompt example showing expected output structure
 
-**Result**: 79-84 graph nodes and 109-135 relationships from test data (was 19 nodes with
-tool calling). Graph contributes to 7/10 search queries.
+**Result**: 32 nodes with 10 diverse entity types (only 3% "concept"), 42 relationships,
+zero self-referential edges. Was: 77 nodes with 92% "concept" type and self-ref loops.
 
 ## 2. Ollama LLM Compatibility Fix (`openmemory/api/app/utils/memory.py`)
 
@@ -55,38 +58,42 @@ Graph results scored at 0.65 (vs vector 0.5-0.85) to provide context without dom
 
 ### Smart Addition
 - Extracts facts via regex with protected splitting (file extensions, version numbers, paths)
+- **Context injection**: Detects project/topic name from text header, prepends to orphaned facts
+  (e.g., `"Total development time 18 months"` → `"Echoes of the Fallen: Total development time 18 months"`)
 - Checks each fact against Qdrant for semantic duplicates (threshold ≥ 0.85)
 - Stores each fact individually with `infer=False, graph=False` (no LLM re-extraction)
-- Runs ONE graph extraction call on the full original text in a **background thread**
+- Graph extraction runs in **background thread**, chunked for long texts (~2000 chars/chunk)
 - Returns detailed status: new / updated / duplicate
 
 ### Fact Extraction Improvements
-Regex-based splitting that protects:
-- File extensions: `.php`, `.js`, `.py`, `.json`, etc.
-- Version numbers: `v3.3`, `PHP 8.2+`, `1.17.0`
-- File paths: `src/components/App.tsx`
-- Uses placeholder substitution during split, restores after
-- Post-validation: minimum 20 chars, rejects orphaned fragments
+- Splits on both newlines and sentence boundaries (handles bullets, headers, numbered lists)
+- Protects file extensions (`.php`, `.js`), version numbers (`v3.3`, `1.17.0`), file paths
+- Minimum fact length: 40 chars (filters headers and label-only lines)
+- Strips bullet markers (`*`, `-`, numbered items)
+- Rejects section headers (short title-cased lines without content)
 
-**Result**: 0 broken fragments (was ~28% with naive splitting on code content).
+**Result**: 93% of facts include project context (was 0% before context injection).
+171 well-formed facts from a 17KB document (was 38 multi-paragraph blobs or 233 fragments).
 
-### Async Graph Extraction
-Graph extraction (~3s LLM call) runs in a daemon thread. The API responds immediately
-after vector storage (~0.5s). Graph populates within 3-5 seconds asynchronously.
+### Async Chunked Graph Extraction
+Long texts are split into ~2000 char chunks for graph extraction. Each chunk gets a
+separate LLM call in a background thread. The API responds immediately after vector
+storage (~0.5s). Graph populates within 10-30 seconds asynchronously for large documents.
 
-**Result**: 5x faster memory addition (0.5s vs 4.5s for medium texts).
+**Result**: 32 nodes with diverse types from a 17KB document (was 0 nodes when sent as
+one giant text — LLM couldn't handle the full context).
 
 ## 4. Custom Prompts for Small Models (`openmemory/api/custom_update_prompt.py`)
 
 Default mem0 prompts are designed for GPT-4 and are too verbose for 4B models.
 
 Three optimized prompts:
-- **Fact extraction**: Forces JSON-only output, many examples of breaking prose into
-  individual facts, today's date for context
+- **Fact extraction**: Forces JSON-only output, context-preserving examples (each fact must
+  include its subject), today's date for context
 - **Update memory**: Clear decision rules (ADD/UPDATE/DELETE/NONE) with bias toward
   preserving information rather than over-deduplicating
-- **Graph relationships**: Code-aware relationship types (is_a, uses, extends, contains,
-  implements, depends_on), filters file extensions and generic words
+- **Graph relationships**: 11 entity types with hierarchy rules, concrete example output,
+  relationship verbs (develops, features, has_phase, has_target, built_with, etc.)
 
 ## 5. Core mem0 Library Changes
 
@@ -99,6 +106,9 @@ Three optimized prompts:
 - **Entity list bug fix**: When `custom_prompt` was set, the user message omitted the
   entity list, causing relationship extraction to fail. Now always includes entity list.
 - Added tech-specific entity type rules to the entity extraction system prompt
+- **Self-referential edge guard**: In `_add_entities()`, compares resolved Neo4j element IDs
+  before creating edges. Prevents self-loops when different entity names (e.g., "water" and
+  "water element") resolve to the same physical node via embedding similarity.
 
 ## 6. MCP Server Enhancements (`openmemory/api/app/mcp_server.py`)
 
@@ -280,14 +290,15 @@ Three layers prevent duplicate storage:
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `openmemory/api/app/utils/enhanced_memory.py` | ~570 | Hybrid search, smart add, async graph |
-| `openmemory/api/fix_graph_entity_parsing.py` | ~225 | JSON-based graph extraction |
-| `openmemory/api/custom_update_prompt.py` | ~140 | Optimized prompts for qwen3:4b |
+| `openmemory/api/app/utils/enhanced_memory.py` | ~620 | Hybrid search, smart add, context injection, chunked graph |
+| `openmemory/api/fix_graph_entity_parsing.py` | ~225 | JSON-based graph extraction with improved prompt |
+| `openmemory/api/custom_update_prompt.py` | ~150 | Context-preserving prompts for qwen3:4b |
 | `openmemory/docker-compose.override.yml` | ~50 | Neo4j + networking |
 | `openmemory/init-qdrant.sh` | ~20 | Collection initialization |
 | `mcp-server/server.js` | ~200 | Standalone MCP server (stdio) |
 | `mcp-server/SKILL.md` | ~50 | Claude Code skill definition |
 | `test_memory_system.py` | ~300 | Comprehensive test suite |
+| `TESTING_GUIDE.md` | ~180 | Testing checklist for extraction pipeline changes |
 
 ### Modified (vs upstream)
 

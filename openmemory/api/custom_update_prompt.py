@@ -30,25 +30,26 @@ EXTRACTION RULES:
 3. Keep each fact focused on ONE specific detail
 4. Do NOT combine related facts - keep them separate
 5. Do NOT skip facts because they seem minor - extract everything
+6. Each fact MUST include the subject (person, project, or entity name) so it makes sense on its own
+   BAD: "Total development time 18 months solo" (what project?)
+   GOOD: "Echoes of the Fallen has 18 months total development time for solo development"
+   BAD: "Uses C++ and Blueprints" (who/what uses them?)
+   GOOD: "Echoes of the Fallen uses C++ and Blueprints"
 
 EXAMPLES:
 
 Input: "Hi, I am looking for a restaurant"
-Output: {{"facts": ["Looking for a restaurant"]}}
+Output: {{"facts": ["User is looking for a restaurant"]}}
 
 Input: "My name is Steven and I have a game development project"
-Output: {{"facts": ["Name is Steven", "Has a game development project"]}}
+Output: {{"facts": ["Steven is the user's name", "Steven has a game development project"]}}
 
 Input: "Echoes of the Fallen is a voxel-based roguelike exploration game that combines permanent knowledge with temporary items in a grim nature-reclaimed world"
 Output: {{
   "facts": [
-    "Game is called Echoes of the Fallen",
-    "Echoes of the Fallen is voxel-based",
-    "Echoes of the Fallen is a roguelike",
-    "Echoes of the Fallen is an exploration game",
-    "Game combines permanent knowledge acquisition",
-    "Game has temporary item systems",
-    "Game world is grim and nature-reclaimed"
+    "Echoes of the Fallen is a voxel-based roguelike exploration game",
+    "Echoes of the Fallen combines permanent knowledge acquisition with temporary item systems",
+    "Echoes of the Fallen is set in a grim nature-reclaimed world"
   ]
 }}
 
