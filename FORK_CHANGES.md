@@ -109,7 +109,7 @@ Three optimized prompts:
 | `add_memories` | Smart add with dedup (via `enhanced_memory_manager`) |
 | `search_memory` | Hybrid search: vector + graph + temporal (limit: 10) |
 | `list_memories` | List all memories with permission filtering |
-| `delete_memories` | Delete by ID, syncs SQLite state |
+| `delete_memories` | Smart delete: returns deleted content + related memories for cascade |
 | `delete_all_memories` | Bulk deletion with state management |
 | `handle_conversation` | Process user message + LLM response, extract memorable content |
 | `get_related_memories` | Relationship traversal, grouped by source (vector/graph/temporal) |
@@ -162,7 +162,54 @@ Fork uses:
 - Manual JSON parsing with markdown code block fallback
 - Returns empty list on failure (non-fatal)
 
-## 10. Memory Router (`openmemory/api/app/routers/memories.py`)
+## 10. MEMORY_MODE: Advanced vs Simple
+
+**Env var**: `MEMORY_MODE` (default: `advanced`)
+
+Controls whether the REST API and MCP server use enhanced features or upstream-like behavior.
+
+| Feature | `advanced` | `simple` |
+|---------|-----------|----------|
+| **Search** | Hybrid: vector + graph + temporal | SQLite `ILIKE` text match |
+| **Add** | Smart add: fact splitting, dedup (≥0.85), async graph | Raw `memory_client.add()` |
+| **Delete** | Returns deleted content + related memories | Returns count only |
+
+### `POST /api/v1/memories/search` (new endpoint)
+Hybrid search endpoint for AI consumers. Keeps `GET /` untouched for UI pagination.
+
+```json
+// Request
+{"query": "steven", "user_id": "steven", "limit": 10}
+
+// Response (advanced)
+{
+  "query": "steven",
+  "results": [
+    {"id": "...", "memory": "...", "score": 0.85, "source": "vector", "created_at": "..."}
+  ],
+  "total": 8,
+  "sources_used": ["vector", "graph", "temporal"]
+}
+```
+
+In `simple` mode, falls back to SQLite `ILIKE` search with score 1.0 and source "text_match".
+
+### Smart Add Response (advanced mode)
+`POST /api/v1/memories/` returns extra fields:
+- `skipped_duplicates`: count of facts rejected by dedup
+- `related_memories`: top 5 similar existing memories with scores
+- `summary`: human-readable status message
+
+### Smart Delete Response (advanced mode)
+`DELETE /api/v1/memories/` returns:
+- `deleted`: list of `{id, memory}` showing what was removed
+- `related_memories`: similar memories with scores/sources for AI cascade decisions
+- `message`: summary with counts
+
+MCP server tools (`delete_memories`, `search_memory`, `add_memories`) respect the same
+`MEMORY_MODE` setting and return equivalent rich responses.
+
+## 11. Memory Router (`openmemory/api/app/routers/memories.py`)
 
 ### New Graph Endpoints
 - `GET /graph/stats` — Entity/relationship counts
@@ -178,7 +225,7 @@ Fork uses:
 - DELETE events from mem0 sync to SQLite state (no phantom entries)
 - `POST /sync-storage` — Bi-directional sync between Qdrant and SQLite
 
-## 11. Database (`openmemory/api/app/database.py`)
+## 12. Database (`openmemory/api/app/database.py`)
 
 SQLite persistence fix:
 ```python
@@ -187,7 +234,7 @@ os.makedirs("db", exist_ok=True)
 ```
 Ensures `./db/` directory exists for Docker volume mounting (`openmemory-db` volume).
 
-## 12. Docker Compose Override (`openmemory/docker-compose.override.yml`)
+## 13. Docker Compose Override (`openmemory/docker-compose.override.yml`)
 
 - **Neo4j 5.26.4**: Graph database with APOC plugin, ports 8474/8687, healthcheck
 - **Qdrant init**: Pre-creates `openmemory` collection (1024-dim cosine)
@@ -195,18 +242,18 @@ Ensures `./db/` directory exists for Docker volume mounting (`openmemory-db` vol
 - Shared `openmemory_network` bridge network
 - Service dependency ordering with healthchecks
 
-## 13. Qdrant Init Script (`openmemory/init-qdrant.sh`)
+## 14. Qdrant Init Script (`openmemory/init-qdrant.sh`)
 
 Waits for Qdrant readiness, then creates `openmemory` collection with 1024-dim Cosine
 vectors. Lets mem0 auto-create `mem0migrations` collection. Non-fatal if collection exists.
 
-## 14. Requirements Changes
+## 15. Requirements Changes
 
 ### `openmemory/api/requirements.txt`
 - Added `langchain-neo4j` — Required for mem0's Neo4j graph store
 - Added `rank-bm25` — BM25 text search for hybrid search
 
-## 15. Test Suite (`test_memory_system.py`)
+## 16. Test Suite (`test_memory_system.py`)
 
 5-phase comprehensive test:
 1. **Insert**: 12 chunks of varied sizes (short/medium/long, dense/sparse, + duplicate test)
@@ -248,8 +295,8 @@ Three layers prevent duplicate storage:
 |------|-------------|
 | `openmemory/api/app/utils/memory.py` | Ollama fix (~300 lines), config cascade, Docker host detection |
 | `openmemory/api/app/utils/categorization.py` | OpenAI → Ollama with JSON fallback parsing |
-| `openmemory/api/app/mcp_server.py` | Enhanced memory manager, 7 tools, permission filter fix |
-| `openmemory/api/app/routers/memories.py` | 7 graph endpoints, DELETE sync, messages[] support |
+| `openmemory/api/app/mcp_server.py` | Enhanced memory manager, 7 tools, permission filter fix, smart delete |
+| `openmemory/api/app/routers/memories.py` | MEMORY_MODE, POST /search, smart add/delete, 7 graph endpoints |
 | `openmemory/api/app/routers/config.py` | Env-based defaults, no auto-create DB rows |
 | `openmemory/api/app/database.py` | SQLite path for Docker volume persistence |
 | `openmemory/api/config.json` | Env var references for all providers |

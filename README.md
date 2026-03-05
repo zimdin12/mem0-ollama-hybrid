@@ -97,6 +97,17 @@ There are **3 separate .env files** for different components:
 
 **When running standalone**, copy `openmemory/api/.env.example` to `.env` and edit it.
 
+#### MEMORY_MODE
+
+Controls whether the API uses enhanced features or basic mem0 operations:
+
+```env
+MEMORY_MODE=advanced   # (default) hybrid search, smart add with dedup, smart delete with related discovery
+MEMORY_MODE=simple     # basic mem0: SQLite text search, raw add, simple delete count
+```
+
+Set in `docker-compose.yml` (parent stack) or `openmemory/api/.env` (standalone).
+
 #### API Environment Variables (the important ones)
 
 ```env
@@ -335,13 +346,24 @@ Uses the bundled plugin at `config/extensions/openmemory/`. Config in `openclaw.
 ### REST API
 
 ```bash
-# Search memories
-curl "http://localhost:8765/api/v1/memories/?user_id=steven&search_query=gpu&size=5"
+# Hybrid search (advanced mode: vector + graph + temporal)
+curl -X POST http://localhost:8765/api/v1/memories/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "what GPU does steven use", "user_id": "steven", "limit": 10}'
 
-# Store a memory
+# Store a memory (advanced mode: smart add with dedup)
+# Returns: added facts, skipped duplicates, related existing memories
 curl -X POST http://localhost:8765/api/v1/memories/ \
   -H "Content-Type: application/json" \
   -d '{"text": "Steven uses an RTX 4090", "user_id": "steven"}'
+
+# Delete (advanced mode: returns deleted content + related memories)
+curl -X DELETE http://localhost:8765/api/v1/memories/ \
+  -H "Content-Type: application/json" \
+  -d '{"memory_ids": ["<uuid>"], "user_id": "steven"}'
+
+# List memories (UI pagination, not hybrid - always available)
+curl "http://localhost:8765/api/v1/memories/?user_id=steven&size=10"
 
 # Graph context
 curl "http://localhost:8765/api/v1/memories/graph/context/Steven?user_id=steven"
@@ -364,7 +386,9 @@ Upstream mem0 defaults to OpenAI for everything. This fork replaces all cloud de
 | Prompts | Verbose (for GPT-4) | Concise, directive (for 4B models) |
 | Memory search | Vector only | Hybrid: vector + graph + temporal (interleaved 60/30/10) |
 | Memory addition | Synchronous, per-fact graph | Async graph extraction in background thread (5x faster) |
+| Memory deletion | Returns count only | Smart delete: returns deleted content + related memories |
 | Deduplication | Basic | Three-layer: cosine ≥ 0.95, vector ≥ 0.85, infer=False |
+| REST API | Basic endpoints | `MEMORY_MODE` switch: `advanced` uses hybrid search/smart add/delete |
 | MCP tools | Basic (4 tools) | Enhanced (7 tools: hybrid search, smart add, graph traversal) |
 | MCP permissions | Filters out graph results | Correctly passes graph/temporal results through |
 | `Memory.add()` | No control over graph | Added `graph=False` parameter for per-fact control |
