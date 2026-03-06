@@ -123,7 +123,7 @@ Three optimized prompts:
 | Tool | Description |
 |------|-------------|
 | `add_memories` | Smart add with dedup (via `enhanced_memory_manager`) |
-| `search_memory` | Hybrid search: vector + graph + temporal (limit: 10) |
+| `search_memory` | Hybrid search: vector + graph + temporal (limit: 10, offset pagination) |
 | `list_memories` | List all memories with permission filtering |
 | `delete_memories` | Smart delete: returns deleted content + related memories for cascade |
 | `delete_all_memories` | Bulk deletion with state management |
@@ -134,6 +134,23 @@ Three optimized prompts:
 Graph and temporal results have generated UUIDs (not in SQLite). The permission filter
 checked `result.id in accessible_memory_ids`, silently dropping all non-vector results.
 Fixed: graph/temporal results bypass permission check (they have no SQLite entry).
+
+### Search Pagination
+`search_memory` MCP tool and `POST /api/v1/memories/search` REST endpoint support `offset`
+parameter for pagination. Fetches `limit + offset` results from hybrid search, then slices.
+Response includes `total_available`, `offset`, `has_more` for cursor-style paging.
+
+### Improved Tool Descriptions
+Tool descriptions rewritten to guide LLMs on correct input format:
+- `add_memories`: "one fact per line, self-contained with subject"
+- `search_memory`: explains offset pagination and query angle tips
+- `handle_conversation`: clarifies use case vs add_memories
+
+### Conversation Memory Filter Fix
+`_extract_memorable_content()` in `enhanced_memory.py` had an aggressive keyword filter
+that required LLM facts to contain words like "recommend" or "suggest" — dropped 95%+ of
+useful content. Replaced with a filler-phrase exclusion filter (skips "sure", "let me",
+"here is", etc.) and minimum length threshold (40 chars).
 
 ### Entity Extraction for Search
 Improved query entity extraction: strips punctuation, expanded stopwords list. Prevents

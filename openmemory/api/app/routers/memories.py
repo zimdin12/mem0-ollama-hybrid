@@ -270,6 +270,7 @@ class SearchMemoriesRequest(BaseModel):
     query: str
     user_id: str
     limit: int = 10
+    offset: int = 0
 
 
 @router.post("/search")
@@ -282,9 +283,12 @@ async def search_memories_hybrid(
         raise HTTPException(status_code=404, detail="User not found")
 
     if _is_advanced_mode():
-        results = enhanced_memory_manager.hybrid_search(
-            request.query, request.user_id, limit=request.limit
+        fetch_limit = request.limit + request.offset
+        all_results = enhanced_memory_manager.hybrid_search(
+            request.query, request.user_id, limit=fetch_limit
         )
+        # Apply offset pagination
+        results = all_results[request.offset:request.offset + request.limit]
         sources_used = list(set(r.source for r in results))
         return {
             "query": request.query,
@@ -299,6 +303,9 @@ async def search_memories_hybrid(
                 for r in results
             ],
             "total": len(results),
+            "total_available": len(all_results),
+            "offset": request.offset,
+            "has_more": len(all_results) > request.offset + request.limit,
             "sources_used": sources_used,
         }
     else:

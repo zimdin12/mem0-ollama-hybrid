@@ -58,7 +58,7 @@ mcp_router = APIRouter(prefix="/mcp")
 # Initialize SSE transport
 sse = SseServerTransport("/mcp/messages/")
 
-@mcp.tool(description="Intelligently add new memories by checking existing knowledge and only storing truly new information. Provides detailed feedback about what was added, updated, or already known.")
+@mcp.tool(description="Store new memories. Send facts as one fact per line — each line should be a complete, self-contained statement that includes the subject (person, project, or entity name). Example format:\n'Steven prefers local-first AI solutions without cloud dependencies.\nEchoes of the Fallen uses Voxel Plugin 2.0 for UE5 with Nanite support.\nThe OpenClaw gateway runs on port 3000 inside Docker.'\nThe system deduplicates against existing memories and only stores truly new information.")
 async def add_memories(text: str) -> str:
     uid = user_id_var.get(None)
     client_name = client_name_var.get(None)
@@ -133,8 +133,8 @@ async def add_memories(text: str) -> str:
         return f"Error adding to memory: {e}"
 
 
-@mcp.tool(description="Perform hybrid search across all memory systems (vector, graph, temporal) to find relevant information. Returns comprehensive results with relationships and context.")
-async def search_memory(query: str) -> str:
+@mcp.tool(description="Search memories using hybrid vector + graph + temporal search. Returns up to 10 results per call. Use offset to paginate (e.g., offset=0 for first 10, offset=10 for next 10). Try different query angles for broader coverage (e.g., 'steven preferences', 'steven projects', 'steven tools').")
+async def search_memory(query: str, offset: int = 0) -> str:
     uid = user_id_var.get(None)
     client_name = client_name_var.get(None)
     if not uid:
@@ -149,8 +149,10 @@ async def search_memory(query: str) -> str:
             user, app = get_user_and_app(db, user_id=uid, app_id=client_name)
 
             # Perform hybrid search using enhanced memory manager
-            search_results = enhanced_memory_manager.hybrid_search(query, uid, limit=10)
-            
+            # Fetch extra results to support offset pagination
+            fetch_limit = 10 + offset
+            search_results = enhanced_memory_manager.hybrid_search(query, uid, limit=fetch_limit)
+
             # Filter results based on permissions
             user_memories = db.query(Memory).filter(Memory.user_id == user.id).all()
             accessible_memory_ids = {str(memory.id) for memory in user_memories if check_memory_access_permissions(db, memory, app.id)}
@@ -170,6 +172,10 @@ async def search_memory(query: str) -> str:
                         "updated_at": result.updated_at.isoformat() if result.updated_at and hasattr(result.updated_at, 'isoformat') else str(result.updated_at) if result.updated_at else None,
                     })
 
+            # Apply offset pagination
+            total_before_offset = len(filtered_results)
+            filtered_results = filtered_results[offset:offset + 10]
+
             # Log access for vector memories with valid IDs
             for result in filtered_results:
                 if result.get("id") and result.get("source") == "vector":
@@ -188,13 +194,16 @@ async def search_memory(query: str) -> str:
                     except ValueError:
                         # Skip invalid UUIDs
                         pass
-            
+
             db.commit()
 
             # Prepare comprehensive response
             response = {
                 "query": query,
                 "total_results": len(filtered_results),
+                "total_available": total_before_offset,
+                "offset": offset,
+                "has_more": total_before_offset > offset + 10,
                 "results": filtered_results,
                 "search_strategy": "hybrid (vector + graph + temporal)",
                 "sources_found": list(set(r["source"] for r in filtered_results)),
@@ -452,7 +461,7 @@ async def delete_all_memories() -> str:
         return f"Error deleting memories: {e}"
 
 
-@mcp.tool(description="Comprehensive memory processing like human memory - automatically extract, store, relate, and provide context from conversation turns. Pass both user message and LLM response for intelligent memory management.")
+@mcp.tool(description="Process a conversation turn to extract and store memorable information. Pass the user's message and your response. Best for: preferences, decisions, corrections, new facts revealed in natural conversation. For bulk fact storage, use add_memories instead.")
 async def handle_conversation(user_message: str, llm_response: str) -> str:
     """
     Comprehensive memory handling that processes both user and LLM messages

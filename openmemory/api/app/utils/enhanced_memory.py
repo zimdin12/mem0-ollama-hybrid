@@ -621,19 +621,35 @@ class EnhancedMemoryManager:
         return novel
     
     def _extract_memorable_content(self, user_message: str, llm_response: str) -> List[str]:
-        """Extract content worth remembering from conversation"""
+        """Extract content worth remembering from conversation.
+
+        User messages: extract all facts (user's words are always worth storing).
+        LLM responses: skip filler/meta lines, keep substantive content.
+        """
         memorable = []
-        
-        # Extract from user message (preferences, facts, context)
+
+        # Extract from user message (preferences, facts, context) — keep all
         user_facts = self._extract_facts(user_message)
         memorable.extend(user_facts)
-        
-        # Extract from LLM response (important information provided)
+
+        # Extract from LLM response — filter out conversational filler
         llm_facts = self._extract_facts(llm_response)
-        # Filter LLM facts to focus on substantive information
-        substantive_llm_facts = [f for f in llm_facts if len(f) > 20 and any(keyword in f.lower() for keyword in ['recommend', 'suggest', 'important', 'remember', 'note', 'consider'])]
-        memorable.extend(substantive_llm_facts)
-        
+        _FILLER_STARTS = (
+            'sure', 'okay', 'alright', 'great', 'yes', 'no', 'i can', "i'll",
+            'let me', 'here is', 'here are', 'as you', 'based on', 'in summary',
+            'to summarize', 'in conclusion', 'as mentioned', 'as i said',
+            'feel free', 'don\'t hesitate', 'hope this', 'glad to',
+        )
+        for fact in llm_facts:
+            fact_lower = fact.lower().strip()
+            # Skip conversational filler and meta-commentary
+            if fact_lower.startswith(_FILLER_STARTS):
+                continue
+            # Skip very short LLM lines (usually transitions/acknowledgments)
+            if len(fact) < 40:
+                continue
+            memorable.append(fact)
+
         return memorable
     
     def _generate_memory_insights(self, related_memories: List[MemorySearchResult], new_content: List[str]) -> List[str]:
