@@ -127,7 +127,7 @@ Three optimized prompts:
 | `list_memories` | List all memories with permission filtering |
 | `delete_memories` | Smart delete: returns deleted content + related memories for cascade |
 | `delete_all_memories` | Bulk deletion with state management |
-| `handle_conversation` | Process user message + LLM response, extract memorable content |
+| `conversation_memory` | Conversation turn → regex extraction → LLM review → dedup → store |
 | `get_related_memories` | Relationship traversal, grouped by source (vector/graph/temporal) |
 
 ### Permission Filter Fix
@@ -145,6 +145,14 @@ Tool descriptions rewritten to guide LLMs on correct input format:
 - `add_memories`: "one fact per line, self-contained with subject"
 - `search_memory`: explains offset pagination and query angle tips
 - `handle_conversation`: clarifies use case vs add_memories
+
+### LLM Fact Review (`conversation_memory` tool)
+The `conversation_memory` tool (renamed from `handle_conversation`) now includes an LLM
+review step after regex extraction. Pipeline: regex splits candidates → LLM reviews via
+Ollama JSON mode → fixes missing context (adds project/entity names to orphaned facts),
+drops noise, merges fragments → dedup → store. Accepts optional `recent_context` parameter
+(JSON array of recent conversation turns) for better context injection. Falls back to
+regex-only if LLM call fails (30s timeout).
 
 ### Conversation Memory Filter Fix
 `_extract_memorable_content()` in `enhanced_memory.py` had an aggressive keyword filter
