@@ -78,14 +78,15 @@ async def add_memories(text: str) -> str:
             if not app.is_active:
                 return f"Error: App {app.name} is currently paused on OpenMemory. Cannot create new memories."
 
-            # Use enhanced memory manager for smart addition
+            # Use enhanced memory manager for smart addition (with LLM review)
             addition_result = enhanced_memory_manager.smart_add_memory(
-                text, 
-                uid, 
+                text,
+                uid,
                 metadata={
                     "source_app": "openmemory",
                     "mcp_client": client_name,
-                }
+                },
+                client_name=client_name,
             )
             
             response = {
@@ -461,15 +462,15 @@ async def delete_all_memories() -> str:
         return f"Error deleting memories: {e}"
 
 
-@mcp.tool(description="Conversation memory — extracts and stores memorable facts from a conversation turn. Pass the user's message and your response. An LLM reviews extracted facts for quality (fixes missing context, drops noise). Best for: preferences, decisions, corrections, new facts from natural conversation. Optionally pass recent_context (JSON array of {role, content} objects) for better extraction quality. For bulk pre-formatted facts, use add_memories instead.")
-async def conversation_memory(user_message: str, llm_response: str, recent_context: str = "") -> str:
+@mcp.tool(description="Conversation memory — extracts and stores memorable facts from a conversation turn. Pass the user's message and your response. The system extracts facts, reviews them with an LLM (fixes missing context, drops noise), deduplicates, and stores. Session context is tracked automatically — no need to pass conversation history. For bulk pre-formatted facts, use add_memories instead.")
+async def conversation_memory(user_message: str, llm_response: str) -> str:
     """
     Conversation memory: regex extraction → LLM review → dedup → store.
-    The LLM review step fixes orphaned facts, drops noise, and merges fragments.
+    Session context tracked server-side for LLM review quality.
     """
     uid = user_id_var.get(None)
     client_name = client_name_var.get(None)
-    
+
     if not uid:
         return "Error: user_id not provided"
     if not client_name:
@@ -485,22 +486,13 @@ async def conversation_memory(user_message: str, llm_response: str, recent_conte
             if not app.is_active:
                 return f"Error: App {app.name} is currently paused on OpenMemory."
 
-            # Parse optional conversation context
-            conversation_context = None
-            if recent_context:
-                try:
-                    conversation_context = json.loads(recent_context)
-                    if not isinstance(conversation_context, list):
-                        conversation_context = None
-                except (json.JSONDecodeError, TypeError):
-                    conversation_context = None
-
             # Use enhanced memory manager with LLM review
+            # Session context is managed server-side automatically
             result = enhanced_memory_manager.comprehensive_memory_handle(
                 user_message,
                 llm_response,
                 uid,
-                conversation_context=conversation_context
+                client_name=client_name,
             )
             
             # Process any new memories that were added

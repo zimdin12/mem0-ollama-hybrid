@@ -42,7 +42,13 @@ class MemoryAdditionResult:
 
 class EnhancedMemoryManager:
     """Enhanced memory manager with hybrid search and smart addition"""
-    
+
+    # Per-session conversation context for LLM review.
+    # Key: "user_id:client_name", Value: list of {"role": ..., "content": ...}
+    # Maintained automatically — no caller action needed.
+    _session_contexts: Dict[str, List[Dict[str, str]]] = {}
+    _MAX_CONTEXT_MESSAGES = 10  # 5 turns (user + assistant each)
+
     def __init__(self):
         self.memory_client = None
         self._initialize_client()
@@ -54,7 +60,25 @@ class EnhancedMemoryManager:
         except Exception as e:
             logging.warning(f"Failed to initialize memory client: {e}")
             self.memory_client = None
-    
+
+    def _get_session_context(self, user_id: str, client_name: str = "") -> List[Dict[str, str]]:
+        """Get recent conversation context for this session."""
+        key = f"{user_id}:{client_name}"
+        return self._session_contexts.get(key, [])[-self._MAX_CONTEXT_MESSAGES:]
+
+    def _append_session_context(self, user_id: str, client_name: str = "",
+                                 user_msg: str = "", assistant_msg: str = ""):
+        """Append a conversation turn to session context (auto-truncates)."""
+        key = f"{user_id}:{client_name}"
+        if key not in self._session_contexts:
+            self._session_contexts[key] = []
+        if user_msg:
+            self._session_contexts[key].append({"role": "user", "content": user_msg[:500]})
+        if assistant_msg:
+            self._session_contexts[key].append({"role": "assistant", "content": assistant_msg[:500]})
+        # Keep only last N messages
+        self._session_contexts[key] = self._session_contexts[key][-self._MAX_CONTEXT_MESSAGES:]
+
     def hybrid_search(self, query: str, user_id: str, limit: int = 10) -> List[MemorySearchResult]:
         """
         Perform hybrid search across vector, graph, and temporal dimensions
@@ -194,20 +218,30 @@ class EnhancedMemoryManager:
         
         return results
     
-    def smart_add_memory(self, text: str, user_id: str, metadata: Dict = None) -> MemoryAdditionResult:
+    def smart_add_memory(self, text: str, user_id: str, metadata: Dict = None,
+                          client_name: str = "") -> MemoryAdditionResult:
         """
-        Intelligently add memory by checking existing memories and extracting only new facts
+        Intelligently add memory by checking existing memories and extracting only new facts.
+        Includes LLM review step to fix orphaned facts and drop noise.
         """
         if not self.memory_client:
             return MemoryAdditionResult([], [], [], [], "error", "Memory system unavailable")
-        
+
         # 1. Search for existing related memories
         existing_memories = self.hybrid_search(text, user_id, limit=20)
-        
+
         # 2. Extract facts from new text
         new_facts = self._extract_facts(text)
-        # 2b. Inject topic context into orphaned facts
+        # 2b. Inject topic context into orphaned facts (fast heuristic)
         new_facts = self._inject_context(new_facts, text)
+        # 2c. LLM review: fix missing context, drop noise, merge fragments
+        if new_facts:
+            new_facts = self._llm_review_facts(
+                candidate_facts=new_facts,
+                source_text=text,
+                user_id=user_id,
+                client_name=client_name,
+            )
 
         # 3. Compare with existing facts
         existing_facts = []
@@ -313,18 +347,52 @@ class EnhancedMemoryManager:
                 summary=f"No new facts found. All {len(new_facts)} facts already exist in memory."
             )
     
-    def comprehensive_memory_handle(self, user_message: str, llm_response: str, user_id: str,
-                                     conversation_context: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
+    def _smart_add_reviewed_fact(self, fact: str, user_id: str, metadata: Dict = None) -> MemoryAdditionResult:
+        """Store a single already-reviewed fact (skip regex extraction and LLM review).
+
+        Used by comprehensive_memory_handle where facts are already reviewed.
+        Still does vector dedup and graph extraction.
+        """
+        if not self.memory_client:
+            return MemoryAdditionResult([], [], [], [], "error", "Memory system unavailable")
+
+        # Dedup check
+        novel = self._find_novel_facts([fact], [], user_id=user_id)
+        if not novel:
+            return MemoryAdditionResult([], [], [fact], [], "duplicate",
+                                         f"Fact already exists in memory.")
+
+        # Store
+        try:
+            response = self.memory_client.add(
+                [{"role": "user", "content": fact}],
+                user_id=user_id,
+                metadata=metadata or {},
+                infer=False,
+                graph=False,
+            )
+            results = response.get('results', [])
+        except Exception as e:
+            logging.warning(f"Failed to add reviewed fact '{fact[:50]}': {e}")
+            return MemoryAdditionResult([], [], [], [], "error", str(e))
+
+        return MemoryAdditionResult(
+            added_memories=results,
+            updated_memories=[],
+            skipped_facts=[],
+            related_memories=[],
+            status="new",
+            summary=f"Stored 1 fact."
+        )
+
+    def comprehensive_memory_handle(self, user_message: str, llm_response: str,
+                                     user_id: str, client_name: str = "") -> Dict[str, Any]:
         """
         Conversation memory processing: extract facts via regex, then LLM-review
         for quality (fix missing context, drop noise, merge fragments).
 
-        Args:
-            user_message: The user's message in this turn
-            llm_response: The LLM's response in this turn
-            user_id: User identifier
-            conversation_context: Optional recent turns [{"role": "user"/"assistant", "content": "..."}]
-                                  for LLM context (max ~3 turns recommended for 4B model)
+        Session context is maintained automatically — each call appends the
+        conversation turn, and the LLM review sees recent history.
         """
         result = {
             "extracted_memories": [],
@@ -340,34 +408,45 @@ class EnhancedMemoryManager:
 
             if not candidate_facts:
                 result["status"] = "no_memorable_content"
+                # Still append context so LLM has history for next call
+                self._append_session_context(user_id, client_name, user_message, llm_response)
                 return result
 
             # 2. LLM review: fix context, drop noise, merge fragments
-            reviewed_facts = self._llm_review_facts(candidate_facts, user_message, llm_response,
-                                                     conversation_context)
+            #    Uses server-side session context automatically
+            reviewed_facts = self._llm_review_facts(
+                candidate_facts=candidate_facts,
+                user_id=user_id,
+                client_name=client_name,
+                user_message=user_message,
+                llm_response=llm_response,
+            )
 
             result["extracted_memories"] = reviewed_facts
 
-            # 3. Search for related existing memories
+            # 3. Append this turn to session context (for next call's LLM review)
+            self._append_session_context(user_id, client_name, user_message, llm_response)
+
+            # 4. Search for related existing memories
             related_memories = []
-            search_queries = list(set(reviewed_facts[:5]))  # Limit search queries
+            search_queries = list(set(reviewed_facts[:5]))
             for content in search_queries:
                 related = self.hybrid_search(content, user_id, limit=5)
                 related_memories.extend(related)
 
-            # 4. Smart addition of reviewed facts
+            # 5. Smart addition of reviewed facts (skip LLM review — already done above)
             for content in reviewed_facts:
-                addition_result = self.smart_add_memory(content, user_id)
+                addition_result = self._smart_add_reviewed_fact(content, user_id)
                 result["memory_updates"].append({
                     "content": content,
                     "result": addition_result.__dict__
                 })
 
-            # 5. Provide contextual insights
+            # 6. Provide contextual insights
             result["related_context"] = [m.__dict__ for m in related_memories[:10]]
             result["insights"] = self._generate_memory_insights(related_memories, reviewed_facts)
 
-            # 6. Identify patterns
+            # 7. Identify patterns
             result["patterns"] = self._identify_conversation_patterns(user_message, llm_response, related_memories)
 
         except Exception as e:
@@ -377,44 +456,58 @@ class EnhancedMemoryManager:
 
         return result
 
-    def _llm_review_facts(self, candidate_facts: List[str], user_message: str, llm_response: str,
-                           conversation_context: Optional[List[Dict[str, str]]] = None) -> List[str]:
+    def _llm_review_facts(self, candidate_facts: List[str],
+                           source_text: str = "",
+                           user_id: str = "", client_name: str = "",
+                           user_message: str = "", llm_response: str = "") -> List[str]:
         """Use LLM to review and fix regex-extracted facts.
 
-        The LLM sees the original conversation + extracted candidates and can:
-        - Fix missing context (add subject/project name to orphaned facts)
-        - Drop noise (filler, meta-commentary, instructions)
-        - Merge fragments that belong together
-        - Split compound facts
+        Works for both add_memories (source_text) and conversation_memory (user_message + llm_response).
+        Uses server-side session context automatically — no caller action needed.
+
+        Controlled by LLM_FACT_REVIEW env var (default: "true"). Set to "false" to disable.
 
         Falls back to original candidates if LLM call fails.
         """
         import requests
         import os
 
+        # Check if LLM review is enabled
+        if os.environ.get('LLM_FACT_REVIEW', 'true').lower() in ('false', '0', 'no', 'off'):
+            logging.info("LLM fact review disabled (LLM_FACT_REVIEW=false)")
+            return candidate_facts
+
         ollama_url = os.environ.get('OLLAMA_BASE_URL', 'http://ollama:11434')
         model = os.environ.get('LLM_MODEL', 'qwen3:4b-instruct-2507-q4_K_M')
 
-        # Build context from recent conversation turns (keep short for 4B model)
+        # Build conversation context from server-side session history
+        session_context = self._get_session_context(user_id, client_name)
+
+        # Assemble the review prompt
+        # Part 1: Recent conversation context (from session history)
         context_block = ""
-        if conversation_context:
-            # Limit to last 3 turns, truncate each to 500 chars
-            recent = conversation_context[-3:]
+        if session_context:
             context_lines = []
-            for turn in recent:
+            for turn in session_context[-6:]:  # Last 3 turns
                 role = turn.get("role", "user")
                 content = turn.get("content", "")[:500]
                 context_lines.append(f"[{role}]: {content}")
-            context_block = "RECENT CONVERSATION CONTEXT:\n" + "\n".join(context_lines) + "\n\n"
+            context_block = "RECENT CONVERSATION:\n" + "\n".join(context_lines) + "\n\n"
 
-        # Format candidate facts as numbered list
+        # Part 2: Source material (either conversation turn or raw text)
+        if user_message or llm_response:
+            source_block = f"CURRENT TURN:\n[user]: {user_message[:800]}\n[assistant]: {llm_response[:800]}"
+        elif source_text:
+            source_block = f"SOURCE TEXT:\n{source_text[:1500]}"
+        else:
+            source_block = ""
+
+        # Part 3: Candidate facts
         facts_list = "\n".join(f"{i+1}. {f}" for i, f in enumerate(candidate_facts))
 
-        prompt = f"""{context_block}CURRENT TURN:
-[user]: {user_message[:800]}
-[assistant]: {llm_response[:800]}
+        prompt = f"""{context_block}{source_block}
 
-EXTRACTED FACTS (by regex):
+EXTRACTED FACTS:
 {facts_list}
 
 REVIEW TASK:
@@ -429,10 +522,19 @@ Return ONLY a JSON object: {{"facts": ["fact1", "fact2", ...]}}
 Return empty list if nothing is worth remembering: {{"facts": []}}"""
 
         try:
+            system_prompt = (
+                "You are a fact reviewer for a memory system. "
+                "You receive conversation context and extracted facts. "
+                "Your job: ensure every fact is self-contained and includes its subject "
+                "(person, project, entity name). Use the conversation context to identify "
+                "what is being discussed and add missing subjects. "
+                "Drop noise and filler. Return only JSON."
+            )
+
             resp = requests.post(f'{ollama_url}/api/chat', json={
                 'model': model,
                 'messages': [
-                    {'role': 'system', 'content': 'You review and fix extracted facts for a memory system. Return only JSON.'},
+                    {'role': 'system', 'content': system_prompt},
                     {'role': 'user', 'content': prompt},
                 ],
                 'stream': False,
