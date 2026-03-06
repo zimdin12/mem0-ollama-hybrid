@@ -461,11 +461,11 @@ async def delete_all_memories() -> str:
         return f"Error deleting memories: {e}"
 
 
-@mcp.tool(description="Process a conversation turn to extract and store memorable information. Pass the user's message and your response. Best for: preferences, decisions, corrections, new facts revealed in natural conversation. For bulk fact storage, use add_memories instead.")
-async def handle_conversation(user_message: str, llm_response: str) -> str:
+@mcp.tool(description="Conversation memory — extracts and stores memorable facts from a conversation turn. Pass the user's message and your response. An LLM reviews extracted facts for quality (fixes missing context, drops noise). Best for: preferences, decisions, corrections, new facts from natural conversation. Optionally pass recent_context (JSON array of {role, content} objects) for better extraction quality. For bulk pre-formatted facts, use add_memories instead.")
+async def conversation_memory(user_message: str, llm_response: str, recent_context: str = "") -> str:
     """
-    Comprehensive memory handling that processes both user and LLM messages
-    like human memory - extracting, storing, relating, and providing context
+    Conversation memory: regex extraction → LLM review → dedup → store.
+    The LLM review step fixes orphaned facts, drops noise, and merges fragments.
     """
     uid = user_id_var.get(None)
     client_name = client_name_var.get(None)
@@ -485,11 +485,22 @@ async def handle_conversation(user_message: str, llm_response: str) -> str:
             if not app.is_active:
                 return f"Error: App {app.name} is currently paused on OpenMemory."
 
-            # Use enhanced memory manager for comprehensive processing
+            # Parse optional conversation context
+            conversation_context = None
+            if recent_context:
+                try:
+                    conversation_context = json.loads(recent_context)
+                    if not isinstance(conversation_context, list):
+                        conversation_context = None
+                except (json.JSONDecodeError, TypeError):
+                    conversation_context = None
+
+            # Use enhanced memory manager with LLM review
             result = enhanced_memory_manager.comprehensive_memory_handle(
-                user_message, 
-                llm_response, 
-                uid
+                user_message,
+                llm_response,
+                uid,
+                conversation_context=conversation_context
             )
             
             # Process any new memories that were added
@@ -522,24 +533,20 @@ async def handle_conversation(user_message: str, llm_response: str) -> str:
 
             db.commit()
             
-            # Prepare comprehensive response
+            # Prepare concise response
+            updates = result.get("memory_updates", [])
+            added = sum(1 for u in updates if u.get("result", {}).get("added_memories"))
+            skipped = sum(len(u.get("result", {}).get("skipped_facts", [])) for u in updates)
+            extracted = result.get("extracted_memories", [])
+
             response = {
-                "processing_status": result.get("status", "processed"),
-                "memory_operations": {
-                    "extracted_content": len(result.get("memory_updates", [])),
-                    "related_memories_found": len(result.get("related_context", [])),
-                    "patterns_identified": result.get("patterns", []),
-                    "insights_generated": result.get("insights", [])
-                },
-                "contextual_information": {
-                    "relevant_memories": result.get("related_context", [])[:5],  # Limit for readability
-                    "conversation_patterns": result.get("patterns", []),
-                    "memory_insights": result.get("insights", [])
-                },
-                "memory_updates": result.get("memory_updates", []),
-                "summary": f"Processed conversation turn: extracted {len(result.get('memory_updates', []))} memory items, "
-                          f"found {len(result.get('related_context', []))} related memories, "
-                          f"identified {len(result.get('patterns', []))} conversation patterns."
+                "status": result.get("status", "processed"),
+                "facts_extracted": len(extracted),
+                "facts_stored": added,
+                "duplicates_skipped": skipped,
+                "extracted_facts": extracted[:20],  # Show what was extracted
+                "related_memories": len(result.get("related_context", [])),
+                "summary": f"Extracted {len(extracted)} facts, stored {added} new, skipped {skipped} duplicates."
             }
             
             return json.dumps(response, indent=2)

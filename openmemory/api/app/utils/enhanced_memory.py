@@ -313,9 +313,18 @@ class EnhancedMemoryManager:
                 summary=f"No new facts found. All {len(new_facts)} facts already exist in memory."
             )
     
-    def comprehensive_memory_handle(self, user_message: str, llm_response: str, user_id: str) -> Dict[str, Any]:
+    def comprehensive_memory_handle(self, user_message: str, llm_response: str, user_id: str,
+                                     conversation_context: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
         """
-        Comprehensive memory processing like human memory - extract, store, relate, and provide context
+        Conversation memory processing: extract facts via regex, then LLM-review
+        for quality (fix missing context, drop noise, merge fragments).
+
+        Args:
+            user_message: The user's message in this turn
+            llm_response: The LLM's response in this turn
+            user_id: User identifier
+            conversation_context: Optional recent turns [{"role": "user"/"assistant", "content": "..."}]
+                                  for LLM context (max ~3 turns recommended for 4B model)
         """
         result = {
             "extracted_memories": [],
@@ -324,38 +333,140 @@ class EnhancedMemoryManager:
             "insights": [],
             "status": "processed"
         }
-        
+
         try:
-            # 1. Extract memorable information from both messages
-            memorable_content = self._extract_memorable_content(user_message, llm_response)
-            
-            # 2. Search for related existing memories
+            # 1. Extract candidate facts via regex (fast, ~1ms)
+            candidate_facts = self._extract_memorable_content(user_message, llm_response)
+
+            if not candidate_facts:
+                result["status"] = "no_memorable_content"
+                return result
+
+            # 2. LLM review: fix context, drop noise, merge fragments
+            reviewed_facts = self._llm_review_facts(candidate_facts, user_message, llm_response,
+                                                     conversation_context)
+
+            result["extracted_memories"] = reviewed_facts
+
+            # 3. Search for related existing memories
             related_memories = []
-            for content in memorable_content:
-                related = self.hybrid_search(content, user_id, limit=10)
+            search_queries = list(set(reviewed_facts[:5]))  # Limit search queries
+            for content in search_queries:
+                related = self.hybrid_search(content, user_id, limit=5)
                 related_memories.extend(related)
-            
-            # 3. Smart addition of new memories
-            for content in memorable_content:
+
+            # 4. Smart addition of reviewed facts
+            for content in reviewed_facts:
                 addition_result = self.smart_add_memory(content, user_id)
                 result["memory_updates"].append({
                     "content": content,
                     "result": addition_result.__dict__
                 })
-            
-            # 4. Provide contextual insights
+
+            # 5. Provide contextual insights
             result["related_context"] = [m.__dict__ for m in related_memories[:10]]
-            result["insights"] = self._generate_memory_insights(related_memories, memorable_content)
-            
-            # 5. Identify patterns and connections
+            result["insights"] = self._generate_memory_insights(related_memories, reviewed_facts)
+
+            # 6. Identify patterns
             result["patterns"] = self._identify_conversation_patterns(user_message, llm_response, related_memories)
-            
+
         except Exception as e:
             logging.error(f"Comprehensive memory handle error: {e}")
             result["status"] = "error"
             result["error"] = str(e)
-        
+
         return result
+
+    def _llm_review_facts(self, candidate_facts: List[str], user_message: str, llm_response: str,
+                           conversation_context: Optional[List[Dict[str, str]]] = None) -> List[str]:
+        """Use LLM to review and fix regex-extracted facts.
+
+        The LLM sees the original conversation + extracted candidates and can:
+        - Fix missing context (add subject/project name to orphaned facts)
+        - Drop noise (filler, meta-commentary, instructions)
+        - Merge fragments that belong together
+        - Split compound facts
+
+        Falls back to original candidates if LLM call fails.
+        """
+        import requests
+        import os
+
+        ollama_url = os.environ.get('OLLAMA_BASE_URL', 'http://ollama:11434')
+        model = os.environ.get('LLM_MODEL', 'qwen3:4b-instruct-2507-q4_K_M')
+
+        # Build context from recent conversation turns (keep short for 4B model)
+        context_block = ""
+        if conversation_context:
+            # Limit to last 3 turns, truncate each to 500 chars
+            recent = conversation_context[-3:]
+            context_lines = []
+            for turn in recent:
+                role = turn.get("role", "user")
+                content = turn.get("content", "")[:500]
+                context_lines.append(f"[{role}]: {content}")
+            context_block = "RECENT CONVERSATION CONTEXT:\n" + "\n".join(context_lines) + "\n\n"
+
+        # Format candidate facts as numbered list
+        facts_list = "\n".join(f"{i+1}. {f}" for i, f in enumerate(candidate_facts))
+
+        prompt = f"""{context_block}CURRENT TURN:
+[user]: {user_message[:800]}
+[assistant]: {llm_response[:800]}
+
+EXTRACTED FACTS (by regex):
+{facts_list}
+
+REVIEW TASK:
+Review the extracted facts above. Fix or improve them:
+1. Each fact MUST include its subject (person, project, entity name) — add it if missing
+2. DROP facts that are noise (filler, instructions, meta-commentary like "here is what I found")
+3. MERGE fragments that describe the same thing into one clear fact
+4. SPLIT compound facts that contain multiple distinct pieces of information
+5. Keep facts concise but self-contained (someone reading just the fact should understand it)
+
+Return ONLY a JSON object: {{"facts": ["fact1", "fact2", ...]}}
+Return empty list if nothing is worth remembering: {{"facts": []}}"""
+
+        try:
+            resp = requests.post(f'{ollama_url}/api/chat', json={
+                'model': model,
+                'messages': [
+                    {'role': 'system', 'content': 'You review and fix extracted facts for a memory system. Return only JSON.'},
+                    {'role': 'user', 'content': prompt},
+                ],
+                'stream': False,
+                'format': 'json',
+            }, timeout=30)
+
+            if resp.status_code != 200:
+                logging.warning(f"LLM fact review failed (HTTP {resp.status_code}), using regex facts")
+                return candidate_facts
+
+            raw = resp.json()
+            msg = raw.get('message', {})
+            content = msg.get('content', '') if isinstance(msg, dict) else str(msg)
+
+            parsed = json.loads(content)
+            reviewed = parsed.get('facts', [])
+
+            if not isinstance(reviewed, list) or len(reviewed) == 0:
+                logging.info("LLM review returned empty/invalid, using regex facts")
+                return candidate_facts
+
+            # Filter: must be strings, min length 20 chars
+            reviewed = [f.strip() for f in reviewed if isinstance(f, str) and len(f.strip()) >= 20]
+
+            if len(reviewed) == 0:
+                logging.info("LLM review filtered to 0 facts, using regex facts")
+                return candidate_facts
+
+            logging.info(f"LLM fact review: {len(candidate_facts)} candidates → {len(reviewed)} reviewed facts")
+            return reviewed
+
+        except Exception as e:
+            logging.warning(f"LLM fact review error ({e}), using regex facts as fallback")
+            return candidate_facts
     
     def _extract_entities_from_query(self, query: str) -> List[str]:
         """Extract potential entities from search query"""

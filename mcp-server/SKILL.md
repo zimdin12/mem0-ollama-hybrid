@@ -11,13 +11,28 @@ You have access to a persistent hybrid memory system via MCP tools. It combines 
 
 | Tool | When to use |
 |------|------------|
-| `search_memory` | Recall facts, preferences, decisions, people, projects — any previously stored context |
-| `add_memories` | Save important facts, preferences, project decisions, or anything worth remembering |
+| `search_memory` | Recall facts, preferences, decisions, people, projects — any previously stored context. Use `offset` to paginate. |
+| `add_memories` | Save pre-formatted facts (one per line, self-contained with subject). Best for bulk storage. |
+| `conversation_memory` | Process a conversation turn — regex extracts candidates, LLM reviews for quality. Best for natural conversation. |
 | `delete_memories` | Delete outdated or incorrect memories by ID |
 | `delete_all_memories` | Wipe all memories for the user (use with extreme caution) |
 | `get_related_memories` | Explore connections between entities via graph traversal |
 | `list_memories` | List all stored memories with optional filtering |
-| `handle_conversation` | Process a user+assistant message pair and extract memorable content |
+
+## Usage Modes
+
+### Default Mode
+Use memory tools when relevant — search before answering questions about the user or past decisions, save when new durable facts appear. No need to call memory on every turn.
+
+### Conversation Memory Mode
+When the user says **"use conversation memory"** (or similar), switch to continuous mode:
+- Call `conversation_memory` after **every turn**, passing your user_message, llm_response, and optionally recent_context (last 2-3 turns as JSON array of `{role, content}` objects)
+- The system handles extraction, LLM review, dedup, and storage automatically
+- Continue until the user says to stop
+
+### When to use which storage tool
+- **`add_memories`**: You have clean, pre-formatted facts (one per line). Best for bulk storage where you've already done the thinking.
+- **`conversation_memory`**: Raw conversation — let the system extract and LLM-review facts. Best for natural conversation where you don't want to manually format.
 
 ## Auto-Recall (start of conversation)
 
