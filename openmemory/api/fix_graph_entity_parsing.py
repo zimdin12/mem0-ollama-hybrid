@@ -168,6 +168,7 @@ def _json_extract_graph(self, data, filters, context=None):
             ],
             'stream': False,
             'format': 'json',
+            'think': False,
         }, timeout=120)
 
         if resp.status_code != 200:

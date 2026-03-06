@@ -240,7 +240,12 @@ class EnhancedMemoryManager:
         existing_memories = self.hybrid_search(text, user_id, limit=20)
 
         # 2. Extract facts from new text
-        new_facts = self._extract_facts(text)
+        #    Short inputs (under 100 chars, single sentence) bypass extraction —
+        #    they are already a single fact and shouldn't be filtered by min length.
+        if len(text.strip()) < 100 and len(text.strip()) >= 10 and '\n' not in text.strip():
+            new_facts = [text.strip()]
+        else:
+            new_facts = self._extract_facts(text)
         # 2b. Inject topic context into orphaned facts (fast heuristic)
         new_facts = self._inject_context(new_facts, text)
         # 2c. LLM review: fix missing context, drop noise, merge fragments
@@ -567,6 +572,7 @@ Return empty list if nothing is worth remembering: {{"facts": []}}"""
                 ],
                 'stream': False,
                 'format': 'json',
+                'think': False,
             }, timeout=30)
 
             if resp.status_code != 200:

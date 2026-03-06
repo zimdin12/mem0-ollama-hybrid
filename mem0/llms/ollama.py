@@ -135,5 +135,9 @@ class OllamaLLM(LLMBase):
         if tools:
             params["tools"] = tools
 
+        # Disable thinking mode for reasoning models (qwen3.5, etc.)
+        # Thinking adds massive latency with no benefit for extraction tasks
+        params["think"] = False
+
         response = self.client.chat(**params)
         return self._parse_response(response, tools)
