@@ -273,50 +273,11 @@ class EnhancedMemoryManager:
                 except Exception as e:
                     logging.warning(f"Failed to add fact '{fact[:50]}': {e}")
 
-            # 6. Graph extraction — chunk long texts to avoid overwhelming the LLM
-            #    Runs in background thread — graph extraction is ~3s per chunk
-            def _background_graph_extract(mem_client, full_text, uid):
-                try:
-                    # Split long texts into chunks (~2000 chars each)
-                    # so the LLM can extract entities/relationships reliably
-                    max_chunk = 2000
-                    if len(full_text) <= max_chunk:
-                        chunks = [full_text]
-                    else:
-                        # Split on paragraph boundaries
-                        paragraphs = re.split(r'\n\n+', full_text)
-                        chunks = []
-                        current = ""
-                        for para in paragraphs:
-                            if len(current) + len(para) > max_chunk and current:
-                                chunks.append(current.strip())
-                                current = para
-                            else:
-                                current = current + "\n\n" + para if current else para
-                        if current.strip():
-                            chunks.append(current.strip())
-
-                    total_added = []
-                    for i, chunk in enumerate(chunks):
-                        try:
-                            result = mem_client._add_to_graph(
-                                [{"role": "user", "content": chunk}],
-                                {"user_id": uid},
-                            )
-                            added = result.get('added_entities', [])
-                            total_added.extend(added)
-                            logging.info(f"Graph chunk {i+1}/{len(chunks)}: {len(added)} entities added")
-                        except Exception as e:
-                            logging.warning(f"Graph chunk {i+1}/{len(chunks)} failed: {e}")
-                    logging.info(f"Graph extraction completed: {len(chunks)} chunks, {len(total_added)} total entities")
-                except Exception as e:
-                    logging.warning(f"Graph extraction failed (non-fatal): {e}")
-
             try:
                 if hasattr(self.memory_client, 'enable_graph') and self.memory_client.enable_graph:
                     import threading
                     t = threading.Thread(
-                        target=_background_graph_extract,
+                        target=self._background_graph_extract,
                         args=(self.memory_client, text, user_id),
                         daemon=True,
                     )
@@ -347,6 +308,42 @@ class EnhancedMemoryManager:
                 summary=f"No new facts found. All {len(new_facts)} facts already exist in memory."
             )
     
+    @staticmethod
+    def _background_graph_extract(mem_client, full_text: str, uid: str):
+        """Chunked graph extraction in background thread."""
+        try:
+            max_chunk = 2000
+            if len(full_text) <= max_chunk:
+                chunks = [full_text]
+            else:
+                paragraphs = re.split(r'\n\n+', full_text)
+                chunks = []
+                current = ""
+                for para in paragraphs:
+                    if len(current) + len(para) > max_chunk and current:
+                        chunks.append(current.strip())
+                        current = para
+                    else:
+                        current = current + "\n\n" + para if current else para
+                if current.strip():
+                    chunks.append(current.strip())
+
+            total_added = []
+            for i, chunk in enumerate(chunks):
+                try:
+                    result = mem_client._add_to_graph(
+                        [{"role": "user", "content": chunk}],
+                        {"user_id": uid},
+                    )
+                    added = result.get('added_entities', [])
+                    total_added.extend(added)
+                    logging.info(f"Graph chunk {i+1}/{len(chunks)}: {len(added)} entities added")
+                except Exception as e:
+                    logging.warning(f"Graph chunk {i+1}/{len(chunks)} failed: {e}")
+            logging.info(f"Graph extraction completed: {len(chunks)} chunks, {len(total_added)} total entities")
+        except Exception as e:
+            logging.warning(f"Graph extraction failed (non-fatal): {e}")
+
     def _smart_add_reviewed_fact(self, fact: str, user_id: str, metadata: Dict = None) -> MemoryAdditionResult:
         """Store a single already-reviewed fact (skip regex extraction and LLM review).
 
@@ -442,7 +439,22 @@ class EnhancedMemoryManager:
                     "result": addition_result.__dict__
                 })
 
-            # 6. Provide contextual insights
+            # 6. Background graph extraction from the full conversation turn
+            #    Combines user + assistant text for richer entity extraction
+            full_turn_text = f"{user_message}\n{llm_response}"
+            try:
+                if hasattr(self.memory_client, 'enable_graph') and self.memory_client.enable_graph:
+                    import threading
+                    t = threading.Thread(
+                        target=self._background_graph_extract,
+                        args=(self.memory_client, full_turn_text, user_id),
+                        daemon=True,
+                    )
+                    t.start()
+            except Exception as e:
+                logging.warning(f"Graph extraction thread start failed: {e}")
+
+            # 7. Provide contextual insights
             result["related_context"] = [m.__dict__ for m in related_memories[:10]]
             result["insights"] = self._generate_memory_insights(related_memories, reviewed_facts)
 
@@ -836,16 +848,19 @@ Return empty list if nothing is worth remembering: {{"facts": []}}"""
     def _extract_memorable_content(self, user_message: str, llm_response: str) -> List[str]:
         """Extract content worth remembering from conversation.
 
-        User messages: extract all facts (user's words are always worth storing).
-        LLM responses: skip filler/meta lines, keep substantive content.
+        User messages: split on sentences, keep everything (even short preferences).
+        LLM responses: use _extract_facts (stricter), skip filler/meta lines.
         """
         memorable = []
 
-        # Extract from user message (preferences, facts, context) — keep all
-        user_facts = self._extract_facts(user_message)
-        memorable.extend(user_facts)
+        # Extract from user message — use lightweight splitting (no min length)
+        # User preferences are often short: "I prefer dark mode", "I use vim"
+        for line in re.split(r'[.\n]+', user_message):
+            line = line.strip()
+            if len(line) >= 8:  # Very low threshold — only skip tiny fragments like "ok" "yes"
+                memorable.append(line)
 
-        # Extract from LLM response — filter out conversational filler
+        # Extract from LLM response — stricter, filter filler
         llm_facts = self._extract_facts(llm_response)
         _FILLER_STARTS = (
             'sure', 'okay', 'alright', 'great', 'yes', 'no', 'i can', "i'll",
@@ -855,10 +870,8 @@ Return empty list if nothing is worth remembering: {{"facts": []}}"""
         )
         for fact in llm_facts:
             fact_lower = fact.lower().strip()
-            # Skip conversational filler and meta-commentary
             if fact_lower.startswith(_FILLER_STARTS):
                 continue
-            # Skip very short LLM lines (usually transitions/acknowledgments)
             if len(fact) < 40:
                 continue
             memorable.append(fact)
