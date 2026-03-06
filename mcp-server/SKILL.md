@@ -26,8 +26,9 @@ Use memory tools when relevant — search before answering questions about the u
 
 ### Conversation Memory Mode
 When the user says **"use conversation memory"** (or similar), switch to continuous mode:
-- Call `conversation_memory` after **every turn**, passing your user_message, llm_response, and optionally recent_context (last 2-3 turns as JSON array of `{role, content}` objects)
+- Call `conversation_memory` after **every turn**, passing your `user_message` and `llm_response`
 - The system handles extraction, LLM review, dedup, and storage automatically
+- Session context is tracked server-side — no need to pass conversation history
 - Continue until the user says to stop
 
 ### When to use which storage tool
@@ -62,12 +63,16 @@ Store memories when the user shares **durable information** — facts that will 
 
 ## How to Store Well
 
-Write memories as **concise, self-contained facts**. Each memory should make sense on its own without context:
+Write memories as **concise, self-contained facts**. Each memory should make sense on its own without context. **Always use specific names** — never use "it", "the project", "the game" without saying which one:
 
 - Good: "Steven prefers TypeScript over JavaScript for new projects"
 - Bad: "He likes TS" (who? compared to what?)
-- Good: "OpenClaw project uses qwen3-coder-next as the default LLM via LM Studio"
-- Bad: "The model was changed" (which model? changed from what?)
+- Good: "Echoes of the Fallen uses dual contouring for terrain generation"
+- Bad: "It uses dual contouring" (what project? what for?)
+- Good: "Steven's friend Alex works at Google on ML infrastructure"
+- Bad: "His friend works at a tech company" (whose friend? which company?)
+
+If you don't know the name of a project or entity, ask the user before storing vague facts.
 
 ## Updating and Correcting
 

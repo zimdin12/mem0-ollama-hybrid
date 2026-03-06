@@ -21,12 +21,19 @@ reliably produce tool_calls — returns empty arrays, wrong arguments, or malfor
 - Skips the delete step entirely (too unreliable with small LLMs)
 - Validates relationships (both source and target must exist in entity map)
 - Filters self-referential relationships (exact + fuzzy containment check)
-- 11 entity types with "concept" as last resort (was defaulting to concept for everything)
-- Relationship hierarchy rules: projects connect to features/phases/tech, persons to skills
+- Dynamic entity types — LLM freely generates types (database, service, protocol, role, etc.)
+  instead of mapping to a fixed whitelist. Only `concept` and `metric` are blocked.
+- Common type suggestions in prompt (person, project, technology, tool, hardware, hobby, etc.)
+  but LLM is free to invent new types as needed
+- Hub-only relationship sources: only `person` and `project` can be relationship sources
+- Number/amount entity filter (regex catches `60fps`, `5000_euros`, `2:3`, etc.)
+- Auto-adds user_id as person if used in relationships but omitted from entities
+- Accepts optional conversation context for better multi-topic understanding
 - Concrete prompt example showing expected output structure
 
-**Result**: 32 nodes with 10 diverse entity types (only 3% "concept"), 42 relationships,
-zero self-referential edges. Was: 77 nodes with 92% "concept" type and self-ref loops.
+**Result**: 41 entities with diverse types (person, project, technology, tool, hardware,
+hobby, database, service, protocol, role), 49 relationships, zero self-referential edges.
+Was: 77 nodes with 92% "concept" type and self-ref loops.
 
 ## 2. Ollama LLM Compatibility Fix (`openmemory/api/app/utils/memory.py`)
 
@@ -98,8 +105,8 @@ Three optimized prompts:
   include its subject), today's date for context
 - **Update memory**: Clear decision rules (ADD/UPDATE/DELETE/NONE) with bias toward
   preserving information rather than over-deduplicating
-- **Graph relationships**: 11 entity types with hierarchy rules, concrete example output,
-  relationship verbs (develops, features, has_phase, has_target, built_with, etc.)
+- **Graph relationships**: Dynamic entity types with hierarchy rules, concrete example output,
+  relationship verbs (develops, features, uses, built_with, has_skill, has_hobby, etc.)
 
 ## 5. Core mem0 Library Changes
 
@@ -111,7 +118,7 @@ Three optimized prompts:
 ### `mem0/memory/graph_memory.py`
 - **Entity list bug fix**: When `custom_prompt` was set, the user message omitted the
   entity list, causing relationship extraction to fail. Now always includes entity list.
-- Added tech-specific entity type rules to the entity extraction system prompt
+- Dynamic entity types in graph extraction (LLM-generated, not whitelist-constrained)
 - **Self-referential edge guard**: In `_add_entities()`, compares resolved Neo4j element IDs
   before creating edges. Prevents self-loops when different entity names (e.g., "water" and
   "water element") resolve to the same physical node via embedding similarity.
@@ -144,15 +151,24 @@ Response includes `total_available`, `offset`, `has_more` for cursor-style pagin
 Tool descriptions rewritten to guide LLMs on correct input format:
 - `add_memories`: "one fact per line, self-contained with subject"
 - `search_memory`: explains offset pagination and query angle tips
-- `handle_conversation`: clarifies use case vs add_memories
+- `conversation_memory`: clarifies use case vs add_memories
 
 ### LLM Fact Review (`conversation_memory` tool)
 The `conversation_memory` tool (renamed from `handle_conversation`) now includes an LLM
 review step after regex extraction. Pipeline: regex splits candidates → LLM reviews via
 Ollama JSON mode → fixes missing context (adds project/entity names to orphaned facts),
-drops noise, merges fragments → dedup → store. Accepts optional `recent_context` parameter
-(JSON array of recent conversation turns) for better context injection. Falls back to
-regex-only if LLM call fails (30s timeout).
+drops noise, merges fragments → dedup → store. Session context is tracked server-side
+automatically — no parameter needed. Falls back to regex-only if LLM call fails (30s timeout).
+Controllable via `LLM_FACT_REVIEW` env var (default: true).
+
+### REST Conversation Endpoint
+`POST /api/v1/memories/conversation` — mirrors the MCP `conversation_memory` tool via REST.
+Accepts `user_message`, `llm_response`, `user_id`, optional `app` and `metadata`.
+
+### Session Context
+Conversation history is retained server-side (per user_id + client_name) and passed to both
+the fact review LLM and graph extraction LLM for better multi-topic understanding. Controllable
+via `SESSION_CONTEXT` env var (default: true).
 
 ### Conversation Memory Filter Fix
 `_extract_memorable_content()` in `enhanced_memory.py` had an aggressive keyword filter
@@ -322,13 +338,14 @@ Three layers prevent duplicate storage:
 | File | Lines | Purpose |
 |------|-------|---------|
 | `openmemory/api/app/utils/enhanced_memory.py` | ~620 | Hybrid search, smart add, context injection, chunked graph |
-| `openmemory/api/fix_graph_entity_parsing.py` | ~225 | JSON-based graph extraction with improved prompt |
+| `openmemory/api/fix_graph_entity_parsing.py` | ~350 | JSON-based graph extraction with dynamic entity types |
 | `openmemory/api/custom_update_prompt.py` | ~150 | Context-preserving prompts for qwen3:4b |
 | `openmemory/docker-compose.override.yml` | ~50 | Neo4j + networking |
 | `openmemory/init-qdrant.sh` | ~20 | Collection initialization |
 | `mcp-server/server.js` | ~200 | Standalone MCP server (stdio) |
 | `mcp-server/SKILL.md` | ~50 | Claude Code skill definition |
-| `test_memory_system.py` | ~300 | Comprehensive test suite |
+| `test_memory_system.py` | ~300 | 5-phase test suite |
+| `test_comprehensive.py` | ~355 | 6-phase test suite (bulk, conversation, search, dedup, graph, qdrant) |
 | `TESTING_GUIDE.md` | ~180 | Testing checklist for extraction pipeline changes |
 
 ### Modified (vs upstream)
@@ -338,7 +355,7 @@ Three layers prevent duplicate storage:
 | `openmemory/api/app/utils/memory.py` | Ollama fix (~300 lines), config cascade, Docker host detection |
 | `openmemory/api/app/utils/categorization.py` | OpenAI → Ollama with JSON fallback parsing |
 | `openmemory/api/app/mcp_server.py` | Enhanced memory manager, 7 tools, permission filter fix, smart delete |
-| `openmemory/api/app/routers/memories.py` | MEMORY_MODE, POST /search, smart add/delete, 7 graph endpoints |
+| `openmemory/api/app/routers/memories.py` | MEMORY_MODE, POST /search, POST /conversation, smart add/delete, 7 graph endpoints |
 | `openmemory/api/app/routers/config.py` | Env-based defaults, no auto-create DB rows |
 | `openmemory/api/app/database.py` | SQLite path for Docker volume persistence |
 | `openmemory/api/config.json` | Env var references for all providers |

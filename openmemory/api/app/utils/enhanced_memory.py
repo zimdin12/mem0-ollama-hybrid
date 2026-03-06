@@ -61,14 +61,23 @@ class EnhancedMemoryManager:
             logging.warning(f"Failed to initialize memory client: {e}")
             self.memory_client = None
 
+    def _is_context_enabled(self) -> bool:
+        """Check if session context retention is enabled via env var."""
+        import os
+        return os.environ.get('SESSION_CONTEXT', 'true').lower() not in ('false', '0', 'no', 'off')
+
     def _get_session_context(self, user_id: str, client_name: str = "") -> List[Dict[str, str]]:
         """Get recent conversation context for this session."""
+        if not self._is_context_enabled():
+            return []
         key = f"{user_id}:{client_name}"
         return self._session_contexts.get(key, [])[-self._MAX_CONTEXT_MESSAGES:]
 
     def _append_session_context(self, user_id: str, client_name: str = "",
                                  user_msg: str = "", assistant_msg: str = ""):
         """Append a conversation turn to session context (auto-truncates)."""
+        if not self._is_context_enabled():
+            return
         key = f"{user_id}:{client_name}"
         if key not in self._session_contexts:
             self._session_contexts[key] = []
@@ -276,9 +285,10 @@ class EnhancedMemoryManager:
             try:
                 if hasattr(self.memory_client, 'enable_graph') and self.memory_client.enable_graph:
                     import threading
+                    ctx = self._get_session_context(user_id, client_name) or None
                     t = threading.Thread(
                         target=self._background_graph_extract,
-                        args=(self.memory_client, text, user_id),
+                        args=(self.memory_client, text, user_id, ctx),
                         daemon=True,
                     )
                     t.start()
@@ -309,7 +319,8 @@ class EnhancedMemoryManager:
             )
     
     @staticmethod
-    def _background_graph_extract(mem_client, full_text: str, uid: str):
+    def _background_graph_extract(mem_client, full_text: str, uid: str,
+                                   context: List[Dict[str, str]] = None):
         """Chunked graph extraction in background thread."""
         try:
             max_chunk = 2000
@@ -331,9 +342,13 @@ class EnhancedMemoryManager:
             total_added = []
             for i, chunk in enumerate(chunks):
                 try:
+                    filters = {"user_id": uid}
+                    # Pass session context to graph extraction via transient filter key
+                    if context:
+                        filters["_session_context"] = context
                     result = mem_client._add_to_graph(
                         [{"role": "user", "content": chunk}],
-                        {"user_id": uid},
+                        filters,
                     )
                     added = result.get('added_entities', [])
                     total_added.extend(added)
@@ -445,9 +460,10 @@ class EnhancedMemoryManager:
             try:
                 if hasattr(self.memory_client, 'enable_graph') and self.memory_client.enable_graph:
                     import threading
+                    ctx = self._get_session_context(user_id, client_name) or None
                     t = threading.Thread(
                         target=self._background_graph_extract,
-                        args=(self.memory_client, full_turn_text, user_id),
+                        args=(self.memory_client, full_turn_text, user_id, ctx),
                         daemon=True,
                     )
                     t.start()

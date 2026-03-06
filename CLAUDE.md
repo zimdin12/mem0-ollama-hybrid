@@ -48,7 +48,7 @@ The OpenMemory API must be running on port 8765. If it's not running yet, see th
 | `list_memories` | List all memories with permission filtering |
 | `delete_memories` | Delete specific memories by ID |
 | `delete_all_memories` | Delete all memories for the user |
-| `handle_conversation` | Process user message + LLM response, extract memorable content |
+| `conversation_memory` | Process user message + LLM response, extract and store memorable facts |
 | `get_related_memories` | Explore entity relationships via graph traversal |
 
 ## Project Structure

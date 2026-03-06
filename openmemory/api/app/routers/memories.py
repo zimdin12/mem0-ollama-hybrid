@@ -530,6 +530,90 @@ async def create_memory(
     return {"results": results_output, "count": len(results_output)}
 
 
+# Conversation memory — REST endpoint matching the MCP tool
+class ConversationMemoryRequest(BaseModel):
+    user_id: str
+    user_message: str
+    llm_response: str
+    metadata: dict = {}
+    app: str = "openmemory"
+
+
+@router.post("/conversation")
+async def conversation_memory(
+    request: ConversationMemoryRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    REST endpoint for conversation_memory.
+    Extracts memorable facts from a conversation turn, reviews with LLM, deduplicates, stores.
+    """
+    from uuid import uuid4
+
+    user = db.query(User).filter(User.user_id == request.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    app_obj = db.query(App).filter(App.name == request.app,
+                                   App.owner_id == user.id).first()
+    if not app_obj:
+        app_obj = App(name=request.app, owner_id=user.id)
+        db.add(app_obj)
+        db.commit()
+        db.refresh(app_obj)
+
+    if not app_obj.is_active:
+        raise HTTPException(status_code=403, detail=f"App {request.app} is currently paused.")
+
+    result = enhanced_memory_manager.comprehensive_memory_handle(
+        request.user_message,
+        request.llm_response,
+        request.user_id,
+        client_name=request.app,
+    )
+
+    # Sync added memories to SQLite
+    for memory_update in result.get("memory_updates", []):
+        addition_result = memory_update.get("result", {})
+        for memory_data in addition_result.get("added_memories", []):
+            if 'id' in memory_data:
+                from uuid import UUID as UUIDType
+                memory_id = UUIDType(memory_data['id'])
+                memory = db.query(Memory).filter(Memory.id == memory_id).first()
+                if not memory:
+                    memory = Memory(
+                        id=memory_id,
+                        user_id=user.id,
+                        app_id=app_obj.id,
+                        content=memory_data.get('memory', memory_update.get('content', '')),
+                        state=MemoryState.active
+                    )
+                    db.add(memory)
+                    db.add(MemoryStatusHistory(
+                        memory_id=memory_id,
+                        changed_by=user.id,
+                        old_state=MemoryState.active,
+                        new_state=MemoryState.active
+                    ))
+
+    db.commit()
+
+    updates = result.get("memory_updates", [])
+    added = sum(1 for u in updates if u.get("result", {}).get("added_memories"))
+    skipped = sum(len(u.get("result", {}).get("skipped_facts", [])) for u in updates)
+    extracted = result.get("extracted_memories", [])
+
+    return {
+        "status": result.get("status", "processed"),
+        "facts_extracted": len(extracted),
+        "facts_stored": added,
+        "duplicates_skipped": skipped,
+        "extracted_facts": extracted[:20],
+        "related_memories": len(result.get("related_context", [])),
+        "summary": f"Extracted {len(extracted)} facts, stored {added} new, skipped {skipped} duplicates."
+    }
+
+
 # Enhanced get memory with graph entities
 @router.get("/{memory_id}")
 async def get_memory(

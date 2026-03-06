@@ -108,6 +108,15 @@ MEMORY_MODE=simple     # basic mem0: SQLite text search, raw add, simple delete 
 
 Set in `docker-compose.yml` (parent stack) or `openmemory/api/.env` (standalone).
 
+#### SESSION_CONTEXT and LLM_FACT_REVIEW
+
+```env
+SESSION_CONTEXT=true     # (default) retain recent conversation turns for context injection
+LLM_FACT_REVIEW=true     # (default) LLM reviews extracted facts for quality before storage
+```
+
+Both can be set to `false` / `0` / `no` / `off` to disable. Disabling LLM review makes adds faster (~0.4s) but lowers fact quality.
+
 #### API Environment Variables (the important ones)
 
 ```env
@@ -357,6 +366,11 @@ curl -X POST http://localhost:8765/api/v1/memories/ \
   -H "Content-Type: application/json" \
   -d '{"text": "Steven uses an RTX 4090", "user_id": "steven"}'
 
+# Conversation memory (extract + review + dedup + store from a conversation turn)
+curl -X POST http://localhost:8765/api/v1/memories/conversation \
+  -H "Content-Type: application/json" \
+  -d '{"user_message": "I switched to Neovim last week", "llm_response": "Nice, Neovim is great", "user_id": "steven"}'
+
 # Delete (advanced mode: returns deleted content + related memories)
 curl -X DELETE http://localhost:8765/api/v1/memories/ \
   -H "Content-Type: application/json" \
@@ -381,7 +395,7 @@ Upstream mem0 defaults to OpenAI for everything. This fork replaces all cloud de
 | Embeddings | OpenAI ada-002 | Ollama (any embedding model — default qwen3-embedding:0.6b, 1024d) |
 | Config | Hardcoded OpenAI keys | Environment variables (cascade: config.json → env) |
 | Categorization | OpenAI structured output | Ollama + manual JSON parsing |
-| Graph extraction | GPT-4 tool calling (3-4 LLM calls) | Single Ollama JSON mode call (`format:'json'`), 11 entity types, hierarchy rules |
+| Graph extraction | GPT-4 tool calling (3-4 LLM calls) | Single Ollama JSON mode call (`format:'json'`), dynamic entity types (LLM chooses), hub-only relationship sources |
 | Fact extraction | Naive sentence splitting | Protected splitting (preserves file extensions, versions, paths), min 35 chars |
 | Context preservation | None | Auto-detects document topic, prepends to orphaned facts (e.g., "Total dev time 18 months" → "Echoes of the Fallen: Total dev time 18 months") |
 | Prompts | Verbose (for GPT-4) | Concise, directive (works with 4B+ models) |
@@ -389,7 +403,8 @@ Upstream mem0 defaults to OpenAI for everything. This fork replaces all cloud de
 | Memory addition | Synchronous, per-fact graph | Async chunked graph extraction in background thread (5x faster) |
 | Memory deletion | Returns count only | Smart delete: returns deleted content + related memories for cascade |
 | Deduplication | Basic | Three-layer: cosine ≥ 0.95 (main.py), vector ≥ 0.85 (enhanced), infer=False |
-| Graph quality | Relies on GPT-4 tool calls | JSON extraction with entity blocklist, fuzzy self-ref filter, element-ID guard |
+| Graph quality | Relies on GPT-4 tool calls | JSON extraction with entity blocklist, number filter, fuzzy self-ref filter, element-ID guard |
+| Session context | None | Optional conversation context passed to fact review and graph extraction LLM |
 | Self-referential edges | Possible | Prevented: fuzzy name matching + Neo4j element-ID comparison |
 | REST API | Basic endpoints | `MEMORY_MODE` switch: `advanced` uses hybrid search/smart add/delete |
 | MCP tools | Basic (4 tools) | Enhanced (7 tools: hybrid search, smart add, graph traversal, smart delete) |
@@ -401,13 +416,14 @@ Upstream mem0 defaults to OpenAI for everything. This fork replaces all cloud de
 | File | Purpose |
 |------|---------|
 | `openmemory/api/app/utils/enhanced_memory.py` | Hybrid search, smart dedup, context injection, async graph extraction |
-| `openmemory/api/fix_graph_entity_parsing.py` | JSON-based graph extraction with 11 entity types and hierarchy rules |
+| `openmemory/api/fix_graph_entity_parsing.py` | JSON-based graph extraction with dynamic entity types and hierarchy rules |
 | `openmemory/api/custom_update_prompt.py` | Context-preserving prompts optimized for small models |
 | `openmemory/docker-compose.override.yml` | Neo4j + Qdrant init + networking |
 | `openmemory/init-qdrant.sh` | Pre-create Qdrant collection (1024d cosine) |
 | `mcp-server/server.js` | Standalone MCP server (4 tools, stdio transport) |
 | `mcp-server/SKILL.md` | Claude Code skill for auto-recall/capture behavior |
 | `test_memory_system.py` | 5-phase test suite (insert, validate, graph, search, dedup) |
+| `test_comprehensive.py` | 6-phase test suite (bulk insert, conversation, search quality, dedup, graph audit, qdrant) |
 | `TESTING_GUIDE.md` | Comprehensive testing checklist for extraction pipeline changes |
 
 ### Files Modified
@@ -417,7 +433,7 @@ Upstream mem0 defaults to OpenAI for everything. This fork replaces all cloud de
 | `openmemory/api/app/utils/memory.py` | Ollama compatibility, env-based config, Docker host detection |
 | `openmemory/api/app/utils/categorization.py` | OpenAI → Ollama with JSON fallback parsing |
 | `openmemory/api/app/mcp_server.py` | Enhanced memory manager, 7 tools, permission filter fix |
-| `openmemory/api/app/routers/memories.py` | MEMORY_MODE, POST /search, smart add/delete, 7 graph endpoints |
+| `openmemory/api/app/routers/memories.py` | MEMORY_MODE, POST /search, POST /conversation, smart add/delete, 7 graph endpoints |
 | `openmemory/api/app/routers/config.py` | Env-based defaults, no auto-create DB rows |
 | `openmemory/api/app/database.py` | SQLite path fix for Docker volume persistence |
 | `openmemory/api/config.json` | Env var references for all providers |
@@ -433,9 +449,10 @@ Benchmarked on RTX 4090 with qwen3:4b + qwen3-embedding:0.6b:
 | Operation | Latency | Notes |
 |-----------|---------|-------|
 | Hybrid search | 90-135ms | Embedding + Qdrant + Neo4j + dedup |
-| Add (short text) | ~0.4s | Vector stored immediately |
-| Add (medium text) | ~0.5s | Multiple facts extracted |
-| Add (long text) | ~0.9s | Many facts, dedup checks |
+| Add (1 fact) | ~0.8s | Embedding + dedup + LLM review |
+| Add (5 facts) | ~3s | Per-fact embedding + dedup |
+| Add (long text) | ~6s | Many facts, dedup, LLM review |
+| Conversation memory | ~3s | Regex extraction + LLM review + dedup + store |
 | Graph population | 3-5s | Runs async after API response |
 
 Embedding model comparison (qwen3-embedding):

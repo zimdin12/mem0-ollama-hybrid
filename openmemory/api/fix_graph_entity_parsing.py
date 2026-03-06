@@ -23,100 +23,148 @@ _original_add = MemoryGraph.add
 _original_retrieve_nodes = MemoryGraph._retrieve_nodes_from_data
 _original_establish_relations = MemoryGraph._establish_nodes_relations_from_data
 
-# Entities that should NOT be in the graph (file extensions, generic words)
+# --- Filters (code-level safety nets, not LLM guidance) ---
+
+# Entity names that are never meaningful graph nodes
 _ENTITY_BLOCKLIST = frozenset([
+    # File extensions (often extracted as entities from code discussions)
     'php', 'js', 'jsx', 'ts', 'tsx', 'py', 'json', 'yaml', 'yml', 'css', 'html',
     'xml', 'md', 'txt', 'sh', 'bat', 'sql', 'csv', 'log', 'conf', 'cfg', 'ini',
+    # Generic filler words
     'utilities', 'default', 'record', 'entity', 'unknown', 'other', 'none', 'null',
-    'true', 'false', 'yes', 'no', 'n/a', 'etc', 'i.e', 'e.g',
+    'true', 'false', 'yes', 'no', 'n/a', 'etc',
+    # Config/infra noise
+    'metadata', 'project', 'timezone', 'port', 'api', 'url', 'host',
 ])
+
+# Number/amount pattern — these should be facts in vector store, not graph nodes
+_NUMBER_PATTERN = re.compile(
+    r'^[\d$€£¥,.%]+$'                    # pure numbers: 60, $5000, 75%
+    r'|^\d+[\w_]*$'                       # number-prefixed: 60fps, 4k, 10gbe
+    r'|^\d+[_-]\w+'                       # number-dash-word: 4-player, 18-months
+    r'|^\d+:\d+'                          # ratios: 2:3
+    r'|\d+_(months?|years?|days?|hours?|minutes?|seconds?|euros?|dollars?|fps|gb|mb|tb|gbe)$'
+)
+
+# Entity types to drop — only truly useless categories
+_BLOCKED_ENTITY_TYPES = frozenset([
+    'concept',      # too vague — if it's not specific enough to type, skip it
+    'metric',       # numbers belong in vector store, not graph
+])
+
+# Types that can be relationship sources (hub nodes that connect to everything else)
+_HUB_TYPES = frozenset(['person', 'project'])
+
+# --- Prompt ---
 
 GRAPH_EXTRACTION_PROMPT = """Extract entities and relationships from text. Return ONLY a JSON object.
 
 Output format:
 {"entities": [{"name": "...", "type": "..."}, ...], "relationships": [{"source": "...", "relation": "...", "target": "..."}, ...]}
 
-ENTITY TYPE RULES (use the MOST SPECIFIC type — "concept" is LAST RESORT):
-- "person": people, users, developers (steven, alice)
-- "project": games, applications, products being built (echoes of the fallen)
-- "technology": languages, engines, protocols (c++, unreal engine 5, http)
-- "framework": specific frameworks (laravel, react, godot)
-- "tool": software tools (magicavoxel, blender, vs code, voxel plugin)
-- "game_element": in-game mechanics, abilities, resources, systems (water magic, skill acquisition, chunk management, dual contouring, nanite)
-- "metric": numbers, targets, budgets, timelines (18 months, $50000 revenue, 80+ metacritic)
-- "phase": development phases, milestones (pre-production, alpha testing, phase 1)
-- "place": locations, real or in-game areas (home meadow, wilderness, exploration ring)
-- "organization": companies, teams, communities (indie developers, discord community)
-- "concept": ONLY for abstract ideas that fit NO other type above
+PURPOSE: Build a knowledge graph for navigating a person's world — their projects, tools, people, interests. Extract only entities worth revisiting later. Fewer high-quality entities is better than many questionable ones.
+
+ENTITY TYPES — use whatever type best describes the entity. Common types include:
+person, project, technology, framework, tool, hardware, organization, place, skill, preference, hobby, game_element, database, service, protocol, genre
+
+You are free to use other types if they fit better. Just be specific — avoid vague types like "concept" or "thing".
+
+ENTITY QUALITY RULES:
+- Names should be 1-4 words, lowercase
+- Each entity should be something a person would want to look up or navigate to later
+- For self-references (I, me, my), use "USER_ID" as the entity name
+- If context mentions a specific project by name, connect related features/tech to THAT project, not to the person
+
+DO NOT create entities from:
+- Numbers, amounts, budgets, durations, percentages, ratios (store these as facts, not graph nodes)
+- Development phases or milestones (phase 1, alpha, sprint 3)
+- Quality levels or settings (full detail, low, medium, high, ultra)
+- URLs, paths, hostnames, env variables, config values
+- Generic words (utilities, default, metadata, mode)
 
 RELATIONSHIP RULES:
-- Connect entities to their PARENT: features/phases/metrics belong to their project
-- Use the person/user as a hub: "steven" develops projects, has skills, uses tools
-- Game elements connect to their project, NOT to each other randomly
-- Phases connect to their project: project has_phase phase
-- Metrics connect to their project: project has_target metric
-- DO NOT connect two entities that mean the same thing (e.g., "water" and "water magic")
-- DO NOT create circular relationships (A->B->A)
+Only "person" and "project" should be relationship SOURCES. Everything else is a target.
+- person -> develops/builds -> project
+- person -> uses/prefers -> tool/technology/framework
+- person -> has_preference -> preference
+- person -> has_skill/learning -> skill/technology
+- person -> has_hobby -> hobby
+- person -> owns -> hardware
+- person -> knows -> person
+- person -> works_at -> organization
+- person -> lives_in -> place
+- project -> built_with -> technology/framework
+- project -> features/uses -> game_element/technology/tool
 
-RELATION VERBS:
-- develops, creates, builds (person -> project)
-- is_a, has_role (person -> role/skill)
-- uses, prefers, learning (person -> technology/tool)
-- features, contains, has_phase (project -> element/phase)
-- has_target, has_budget (project -> metric)
-- part_of, belongs_to (element -> project)
-- built_with, uses (project -> technology)
-- inspired_by (project -> project)
-- unlocks, enables (game_element -> game_element, within same project)
+When text says "the game" or "the project", use the actual project name from context instead.
 
 EXAMPLE:
-Text: "Steven is a PHP developer building Echoes of the Fallen, a voxel roguelike. Total development time is 18 months. The game uses C++ and dual contouring for terrain. Phase 1 covers foundation work months 1-6."
+Text: "Steven is a PHP developer building Echoes of the Fallen, a voxel roguelike. He prefers dark mode and uses vim. Alex works at Google. The game uses C++ and dual contouring. Steven also enjoys cooking."
 Output:
 {"entities": [
   {"name": "steven", "type": "person"},
   {"name": "echoes of the fallen", "type": "project"},
-  {"name": "php", "type": "technology"},
   {"name": "c++", "type": "technology"},
-  {"name": "dual contouring", "type": "game_element"},
-  {"name": "18 months development", "type": "metric"},
-  {"name": "phase 1 foundation", "type": "phase"}
+  {"name": "dual contouring", "type": "technology"},
+  {"name": "dark mode", "type": "preference"},
+  {"name": "vim", "type": "tool"},
+  {"name": "alex", "type": "person"},
+  {"name": "google", "type": "organization"},
+  {"name": "php development", "type": "skill"},
+  {"name": "cooking", "type": "hobby"}
 ], "relationships": [
-  {"source": "steven", "relation": "is_a", "target": "php developer"},
   {"source": "steven", "relation": "develops", "target": "echoes of the fallen"},
+  {"source": "steven", "relation": "has_skill", "target": "php development"},
+  {"source": "steven", "relation": "has_preference", "target": "dark mode"},
+  {"source": "steven", "relation": "uses", "target": "vim"},
+  {"source": "steven", "relation": "knows", "target": "alex"},
+  {"source": "steven", "relation": "has_hobby", "target": "cooking"},
+  {"source": "alex", "relation": "works_at", "target": "google"},
   {"source": "echoes of the fallen", "relation": "built_with", "target": "c++"},
-  {"source": "echoes of the fallen", "relation": "features", "target": "dual contouring"},
-  {"source": "echoes of the fallen", "relation": "has_target", "target": "18 months development"},
-  {"source": "echoes of the fallen", "relation": "has_phase", "target": "phase 1 foundation"}
-]}
-
-Rules:
-- Keep entity names concise (2-4 words max), lowercase
-- Do NOT create entities from file extensions (.php, .js)
-- Do NOT create entities from generic words (utilities, default, record)
-- For self-references (I, me, my), use "USER_ID" as the entity name"""
+  {"source": "echoes of the fallen", "relation": "features", "target": "dual contouring"}
+]}"""
 
 
-def _json_extract_graph(self, data, filters):
+def _json_extract_graph(self, data, filters, context=None):
     """
     Extract entities and relationships using JSON mode (single LLM call).
     Returns (entity_type_map, relationships).
+
+    Args:
+        context: Optional list of recent conversation turns [{role, content}, ...]
+                 to help the LLM understand multi-topic text.
     """
     user_id = filters.get('user_id', 'user')
     prompt = GRAPH_EXTRACTION_PROMPT.replace("USER_ID", user_id)
 
     try:
-        # Use Ollama's JSON mode directly
         import requests
         import os
 
         ollama_url = os.environ.get('OLLAMA_BASE_URL', 'http://ollama:11434')
         model = os.environ.get('LLM_MODEL', 'qwen3:4b-instruct-2507-q4_K_M')
 
+        # Build user message with optional conversation context
+        user_content = data
+        if context:
+            context_lines = []
+            for turn in context[-6:]:  # last 3 turns max
+                role = turn.get('role', 'user')
+                content = turn.get('content', '')[:400]
+                context_lines.append(f"[{role}]: {content}")
+            if context_lines:
+                user_content = (
+                    "CONVERSATION CONTEXT (for understanding topics being discussed):\n"
+                    + "\n".join(context_lines)
+                    + "\n\nTEXT TO EXTRACT FROM:\n"
+                    + data
+                )
+
         resp = requests.post(f'{ollama_url}/api/chat', json={
             'model': model,
             'messages': [
                 {'role': 'system', 'content': prompt},
-                {'role': 'user', 'content': data},
+                {'role': 'user', 'content': user_content},
             ],
             'stream': False,
             'format': 'json',
@@ -143,7 +191,7 @@ def _json_extract_graph(self, data, filters):
 
         parsed = json.loads(content)
 
-        # Build entity_type_map
+        # --- Build entity_type_map with safety filters ---
         entity_type_map = {}
         raw_entities = parsed.get('entities', [])
         for ent in raw_entities:
@@ -157,17 +205,33 @@ def _json_extract_graph(self, data, filters):
                 continue
             if not name:
                 continue
+
             # Normalize
             name_key = name.lower().replace(' ', '_')
             etype_key = etype.lower().replace(' ', '_')
-            # Filter blocked entities
+
+            # Hard filters (structural, not domain-specific)
             if name_key in _ENTITY_BLOCKLIST:
                 continue
             if len(name_key) < 2:
                 continue
+            if len(name_key) > 60:
+                logger.info(f"Skipping overly long entity: {name_key[:40]}...")
+                continue
+            if any(c in name_key for c in ('http://', 'https://', '=', '://', '.internal')):
+                logger.info(f"Skipping URL/config entity: {name_key}")
+                continue
+            if _NUMBER_PATTERN.match(name_key):
+                logger.info(f"Skipping number/amount entity: {name_key}")
+                continue
+            if etype_key in _BLOCKED_ENTITY_TYPES:
+                logger.info(f"Skipping entity with blocked type: {name_key} ({etype_key})")
+                continue
+
+            # Accept whatever type the LLM generated
             entity_type_map[name_key] = etype_key
 
-        # Build relationships list
+        # --- Build relationships with structural validation ---
         relationships = []
         raw_rels = parsed.get('relationships', [])
         for rel in raw_rels:
@@ -179,21 +243,39 @@ def _json_extract_graph(self, data, filters):
 
             if not source or not target or not relation:
                 continue
-            # Skip self-references (exact match)
+            # Self-reference checks
             if source == target:
                 continue
-            # Skip fuzzy self-references (one contains the other)
             if len(source) > 2 and len(target) > 2 and (source in target or target in source):
                 logger.info(f"Skipping fuzzy self-ref: {source} -> {target}")
                 continue
-            # Skip blocked entities
+            # Hard filters on entity names
             if source in _ENTITY_BLOCKLIST or target in _ENTITY_BLOCKLIST:
                 continue
-            # Ensure both entities are in the map (add if missing)
+            if _NUMBER_PATTERN.match(source) or _NUMBER_PATTERN.match(target):
+                logger.info(f"Skipping relationship with number entity: {source} -> {target}")
+                continue
+
+            # Auto-add user_id as person if used in relationship (LLM often omits from entities)
+            user_id_key = user_id.lower().replace(' ', '_')
             if source not in entity_type_map:
-                entity_type_map[source] = 'concept'
+                if source == user_id_key:
+                    entity_type_map[source] = 'person'
+                else:
+                    logger.info(f"Skipping relationship with unknown source: {source}")
+                    continue
             if target not in entity_type_map:
-                entity_type_map[target] = 'concept'
+                if target == user_id_key:
+                    entity_type_map[target] = 'person'
+                else:
+                    logger.info(f"Skipping relationship with unknown target: {target}")
+                    continue
+
+            # Only hub types (person, project) should be relationship sources
+            source_type = entity_type_map.get(source, '')
+            if source_type not in _HUB_TYPES:
+                logger.info(f"Skipping relationship with non-hub source: {source} ({source_type}) -> {target}")
+                continue
 
             relationships.append({
                 'source': source,
@@ -217,8 +299,11 @@ def _patched_add(self, data, filters):
     Replacement for MemoryGraph.add() that uses JSON extraction.
     Skips the unreliable tool-calling-based pipeline entirely.
     """
+    # Extract context from filters (transient field, not persisted)
+    context = filters.pop('_session_context', None)
+
     # Step 1: Extract entities and relationships in one JSON call
-    entity_type_map, to_be_added = _json_extract_graph(self, data, filters)
+    entity_type_map, to_be_added = _json_extract_graph(self, data, filters, context=context)
 
     if not entity_type_map and not to_be_added:
         logger.info("Graph extraction returned nothing, skipping graph update")

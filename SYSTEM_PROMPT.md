@@ -14,7 +14,7 @@ You have access to a persistent hybrid memory system via MCP tools. It combines 
 |------|------------|
 | `search_memory` | Recall facts, preferences, decisions, people, projects. Use `offset` to paginate (0, 10, 20...). Try different query angles for broader coverage. |
 | `add_memories` | Store pre-formatted facts. Send one fact per line. Each fact must be self-contained with its subject (person, project, entity). |
-| `conversation_memory` | Process a conversation turn. Pass `user_message` and `llm_response`. Optionally pass `recent_context` (JSON array of recent `{role, content}` turns). The system extracts facts, reviews them with an LLM, deduplicates, and stores. |
+| `conversation_memory` | Process a conversation turn. Pass `user_message` and `llm_response`. The system extracts facts, reviews them with an LLM, deduplicates, and stores. Session context is tracked server-side automatically. |
 | `delete_memories` | Delete specific memories by ID. |
 | `get_related_memories` | Explore entity connections in the knowledge graph. |
 | `list_memories` | List all stored memories. |
@@ -42,12 +42,16 @@ Store **durable information** — facts useful in future sessions:
 
 ### How to Store Well
 
-Write facts as **concise, self-contained statements**. Each fact must make sense alone:
+Write facts as **concise, self-contained statements**. Each fact must make sense alone. **Always use specific names** — never "it", "the project", "the game" without identifying which one:
 
 - GOOD: "Steven prefers TypeScript over JavaScript for new projects"
 - BAD: "He likes TS" (who? compared to what?)
-- GOOD: "Echoes of the Fallen uses C++ and Blueprints in UE5"
-- BAD: "Uses C++ and Blueprints" (what project?)
+- GOOD: "Echoes of the Fallen uses dual contouring for terrain generation"
+- BAD: "It uses dual contouring" (what project?)
+- GOOD: "Steven's friend Alex works at Google on ML infrastructure"
+- BAD: "His friend works at a tech company" (whose friend? which company?)
+
+If you don't know the name of something, ask the user before storing a vague fact.
 
 With `add_memories`, send one fact per line:
 ```
@@ -60,7 +64,7 @@ The OpenClaw gateway runs on port 3000 inside Docker.
 
 **Default mode**: Use memory tools when relevant. Search before answering user-specific questions. Save when new durable facts appear. No need to call memory on every turn.
 
-**Conversation memory mode**: When the user says "use conversation memory" (or similar), call `conversation_memory` after **every turn** with your user_message, llm_response, and optionally recent_context (last 2-3 turns). Continue until the user says to stop.
+**Conversation memory mode**: When the user says "use conversation memory" (or similar), call `conversation_memory` after **every turn** with your `user_message` and `llm_response`. Session context is tracked server-side — no need to pass history. Continue until the user says to stop.
 
 ### Corrections
 
