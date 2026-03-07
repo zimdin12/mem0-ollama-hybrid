@@ -550,6 +550,65 @@ async def conversation_memory(user_message: str, llm_response: str) -> str:
         return f"Error processing conversation: {e}"
 
 
+@mcp.tool(description="Ask a natural language question about stored memories. The Memory Brain agent autonomously searches vector store, knowledge graph, and SQLite to synthesize a comprehensive answer. Use for complex queries like: 'what hobbies does Steven have?', 'summarize what you know about project X', 'how are Steven and Docker related?'. Returns a synthesized answer, not raw search results.")
+async def memory_ask(request: str) -> str:
+    """Natural language memory query via brain agent (read-only)."""
+    uid = user_id_var.get(None)
+    if not uid:
+        return "Error: user_id not provided"
+
+    try:
+        from app.brain.agent import brain_agent
+        result = brain_agent.run(
+            request=request,
+            user_id=uid,
+            read_only=True,
+        )
+        response = {
+            "answer": result.answer,
+            "steps": result.steps,
+            "tools_used": result.tools_called,
+            "success": result.success,
+            "elapsed_seconds": round(result.elapsed_seconds, 2),
+        }
+        if result.error:
+            response["error"] = result.error
+        return json.dumps(response, indent=2)
+    except Exception as e:
+        logging.exception(f"memory_ask error: {e}")
+        return f"Error: {e}"
+
+
+@mcp.tool(description="Perform a natural language memory operation: store, update, delete, or reorganize memories. The Memory Brain agent autonomously decides which tools to use. Examples: 'remember that Steven switched to Godot', 'delete all memories about dark mode', 'update Steven's GPU to RTX 5090'. Auto-confirmed — the LLM calling this has already decided to do it.")
+async def memory_do(request: str) -> str:
+    """Natural language memory operation via brain agent (read-write, auto-confirmed)."""
+    uid = user_id_var.get(None)
+    if not uid:
+        return "Error: user_id not provided"
+
+    try:
+        from app.brain.agent import brain_agent
+        result = brain_agent.run(
+            request=request,
+            user_id=uid,
+            read_only=False,
+            dry_run=False,
+        )
+        response = {
+            "answer": result.answer,
+            "steps": result.steps,
+            "tools_used": result.tools_called,
+            "success": result.success,
+            "elapsed_seconds": round(result.elapsed_seconds, 2),
+        }
+        if result.error:
+            response["error"] = result.error
+        return json.dumps(response, indent=2)
+    except Exception as e:
+        logging.exception(f"memory_do error: {e}")
+        return f"Error: {e}"
+
+
 @mcp.tool(description="Get memories related to specific entities or topics, with relationship traversal and contextual connections.")
 async def get_related_memories(topic: str, max_depth: int = 2) -> str:
     """

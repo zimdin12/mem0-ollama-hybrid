@@ -109,6 +109,30 @@ const TOOLS = [
       required: ["entity"],
     },
   },
+  {
+    name: "memory_ask",
+    description:
+      "Ask a natural language question about stored memories. The Memory Brain agent autonomously searches vector store, knowledge graph, and SQLite to synthesize a comprehensive answer. Use for complex queries like: 'what hobbies does Steven have?', 'summarize what you know about project X'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        request: { type: "string", description: "Natural language question about memories" },
+      },
+      required: ["request"],
+    },
+  },
+  {
+    name: "memory_do",
+    description:
+      "Perform a natural language memory operation: store, update, delete, or reorganize memories. The Memory Brain agent autonomously decides which tools to use. Examples: 'remember that Steven switched to Godot', 'delete all memories about dark mode'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        request: { type: "string", description: "Natural language instruction for memory operation" },
+      },
+      required: ["request"],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -207,11 +231,29 @@ async function handleRelated({ entity }) {
   return text;
 }
 
+async function handleMemoryAsk({ request }) {
+  const result = await api("/api/v1/brain/ask", {
+    method: "POST",
+    body: { request, user_id: USER_ID },
+  });
+  return result?.answer || JSON.stringify(result);
+}
+
+async function handleMemoryDo({ request }) {
+  const result = await api("/api/v1/brain/do", {
+    method: "POST",
+    body: { request, user_id: USER_ID, confirmed: true },
+  });
+  return result?.answer || JSON.stringify(result);
+}
+
 const HANDLERS = {
   mem_search: handleSearch,
   mem_store: handleStore,
   mem_forget: handleForget,
   mem_related: handleRelated,
+  memory_ask: handleMemoryAsk,
+  memory_do: handleMemoryDo,
 };
 
 // ---------------------------------------------------------------------------
