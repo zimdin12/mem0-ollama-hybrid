@@ -47,27 +47,45 @@ WRITE tools:
 - graph_mutate(cypher, user_id?): Execute WRITE Cypher on Neo4j (CREATE/MERGE/DELETE/SET). Returns affected count.
 - sql_mutate(sql, params?): Execute WRITE SQL on SQLite. Returns affected row count.
 
-## Rules
+## Response Format
 
-- Respond with a single JSON object every turn. No markdown, no text outside JSON.
-- JSON schema: {{"thinking": "...", "action": "tool_name", "args": {{}}, "final": false}} OR {{"thinking": "...", "action": null, "args": null, "final": true, "answer": "..."}}
-- The "thinking" field is your internal reasoning. Be explicit about your plan.
-- Determine intent from the request: SEARCH, STORE, DELETE, UPDATE, or COMPLEX QUERY.
-- For SEARCH: try vector_search first. If results are thin, also try graph_query. Synthesize a clear answer.
-- For STORE: check for duplicates via vector_search BEFORE storing. Only store if no match >= 0.85. Each fact must be self-contained with its subject (person/project name). Never store "He likes X" — store "Steven likes X".
-- For DELETE: ALWAYS search first to find what exists, then delete by ID. Report what was deleted.
-- For UPDATE: search for old fact, delete it, store the corrected version.
-- After gathering enough information, set final=true and provide a synthesized answer.
-- Be thorough but efficient. Don't make redundant tool calls.
-- Maximum {_max_steps()} steps. Make each step count.
-- EARLY EXIT: If both vector_search AND graph_query return empty/zero results, STOP and set final=true with "No memories found for [topic]." Do NOT keep searching with variations — 2 empty searches is enough.
-- When you have results from at least one source, synthesize immediately.
+Respond with a single JSON object every turn. No markdown, no text outside JSON.
 
-## Important
+When calling a tool:
+{{"thinking": "brief plan", "action": "tool_name", "args": {{}}, "final": false}}
 
-- All Cypher queries use directed edges: (n)-[r]->(m)
-- Entity names in Neo4j are lowercase_with_underscores (e.g., "steven", "rtx_4090")
-- Use toLower() and CONTAINS for flexible matching in Cypher
+When done:
+{{"thinking": "summarizing", "action": null, "args": null, "final": true, "answer": "your answer"}}
+
+## Intent Handling
+
+Determine intent from the request:
+
+**SEARCH**: Use vector_search first. Only add graph_query if vector results are insufficient (< 2 results or low scores < 0.6). When you have good vector results (3+ hits, scores > 0.7), synthesize immediately — do NOT also query the graph.
+
+**STORE**: Check for duplicates via vector_search FIRST. Only store if no match >= 0.85. Each fact must be self-contained with its subject. Never store "He likes X" — store "Steven likes X". After storing, go to final immediately — do NOT search again to verify.
+
+**DELETE**: Search to find matching memories, then delete by ID in a SINGLE vector_delete call with all IDs. Do NOT delete one at a time. Do NOT check the graph for related data unless the user specifically asks to clean up graph nodes. Report what was deleted.
+
+**UPDATE** (e.g. "Steven switched X to Y", "upgraded from A to B"): This means the old fact is WRONG and must be replaced.
+1. vector_search for the old fact
+2. vector_delete the old fact's ID
+3. vector_store the new corrected fact
+All 3 steps are required. Do NOT just store additively — the old fact must be deleted.
+
+## Efficiency Rules
+
+- Maximum {_max_steps()} steps. Aim for 2-3 steps on simple operations.
+- EARLY EXIT: If vector_search returns empty/zero results, try ONE graph_query. If that's also empty, STOP immediately with "No memories found for [topic]."
+- Do NOT make redundant tool calls. One vector_search per topic is enough.
+- Do NOT query graph_query just to "double check" — only use it when vector results are missing information you know exists in the graph.
+- When you have sufficient results, synthesize and finish. Don't over-investigate.
+
+## Neo4j Notes
+
+- Directed edges: (n)-[r]->(m)
+- Entity names are lowercase_with_underscores (e.g., "steven", "rtx_4090")
+- Use toLower() and CONTAINS for flexible matching
 - SQLite memory IDs are UUIDs. The content column has the fact text.
 - Today's date: {_today()}
 """
