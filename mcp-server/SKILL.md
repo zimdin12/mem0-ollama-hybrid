@@ -1,115 +1,56 @@
 ---
 name: openmemory
-description: Hybrid memory system (vector + graph + temporal). Use search_memory, add_memories, delete_memories, get_related_memories tools to recall, store, and explore persistent knowledge.
+description: Memory Agent — talk to the memory system in natural language. It autonomously searches, stores, deletes, and updates memories across vector, graph, and temporal databases.
 ---
 
-# OpenMemory — Hybrid Memory System
+# OpenMemory — Memory Agent (v2)
 
-You have access to a persistent hybrid memory system via MCP tools. It combines vector search (semantic similarity), graph traversal (entity relationships), and temporal context (recency) to provide rich recall.
+You have access to a Memory Agent — an autonomous LLM that manages a persistent hybrid memory system (vector + graph + temporal). Talk to it in natural language. It determines intent and chains database operations as needed.
 
-## Available MCP Tools
-
-### v2 — Memory Agent (recommended)
+## MCP Tool
 
 | Tool | When to use |
 |------|------------|
-| `memory_agent` | Talk to the memory agent in natural language. It autonomously searches, stores, deletes, or updates memories. Examples: "What does Steven use for coding?", "Steven switched from UE5 to Godot", "Delete all memories about dark mode". The agent determines intent and chains operations as needed. |
+| `memory_agent` | All memory operations. Search, store, delete, update, explore relationships — describe what you need in natural language. |
 
-### v1 — Direct Tools (faster, simpler)
+**Examples:**
+- Search: "What GPU does Steven use?", "What do we know about the Echoes project?"
+- Store: "Steven has a girlfriend called Mirjam", "The project uses PostgreSQL for production"
+- Update: "Steven switched from UE5 to Godot", "Steven upgraded to RTX 5090"
+- Delete: "Delete all memories about dark mode", "Remove the memory about PHP"
+- Explore: "How is Steven connected to Echoes of the Fallen?", "What tools does Steven use?"
+- Complex: "Tell me everything about Steven's hardware setup"
 
-| Tool | When to use |
-|------|------------|
-| `search_memory` | Recall facts, preferences, decisions, people, projects — any previously stored context. Use `offset` to paginate. |
-| `add_memories` | Save pre-formatted facts (one per line, self-contained with subject). Best for bulk storage. |
-| `conversation_memory` | Process a conversation turn — regex extracts candidates, LLM reviews for quality. Best for natural conversation. |
-| `delete_memories` | Delete outdated or incorrect memories by ID |
-| `delete_all_memories` | Wipe all memories for the user (use with extreme caution) |
-| `get_related_memories` | Explore connections between entities via graph traversal |
-| `list_memories` | List all stored memories with optional filtering |
+## When to Use Memory
 
-## When to use v2 vs v1
+### Start of Conversation
+Ask the memory agent about context relevant to the current task:
+- "What do we know about Steven's preferences?"
+- "What's stored about this project?"
 
-- **`memory_agent`** (v2): Best for complex operations — "update Steven's GPU to RTX 5090", "what's the relationship between Steven and Docker?", "delete everything about dark mode". The agent chains multiple tool calls autonomously.
-- **v1 tools**: Best for simple, fast operations — quick search, store a single fact, delete by ID. Lower latency since they don't invoke an LLM reasoning loop.
+### During Conversation
+When the user shares durable information — facts useful in future sessions:
+- Preferences, project decisions, environment facts, people, lessons learned
 
-## Usage Modes
+Tell the memory agent in natural language: "Remember that Steven prefers dark mode in all editors"
 
-### Default Mode
-Use memory tools when relevant — search before answering questions about the user or past decisions, save when new durable facts appear. No need to call memory on every turn.
+### Corrections and Updates
+Tell the agent directly: "Steven no longer uses Godot, he switched to Unreal Engine 5"
 
-### Conversation Memory Mode
-When the user says **"use conversation memory"** (or similar), switch to continuous mode:
-- Call `conversation_memory` after **every turn**, passing your `user_message` and `llm_response`
-- The system handles extraction, LLM review, dedup, and storage automatically
-- Session context is tracked server-side — no need to pass conversation history
-- Continue until the user says to stop
-
-### When to use which storage tool
-- **`add_memories`**: You have clean, pre-formatted facts (one per line). Best for bulk storage where you've already done the thinking.
-- **`conversation_memory`**: Raw conversation — let the system extract and LLM-review facts. Best for natural conversation where you don't want to manually format.
-
-## Auto-Recall (start of conversation)
-
-At the **start of every conversation**, search memory for context relevant to the current task:
-
-1. If the user mentions a project, person, or topic — `search_memory` for it
-2. If working in a specific codebase — `search_memory` for the project name or directory
-3. If the user references a past decision or preference — `search_memory` before assuming
-
-Keep searches focused. One or two targeted queries are better than broad sweeps.
-
-## Auto-Capture (during conversation)
-
-Store memories when the user shares **durable information** — facts that will be useful in future sessions:
-
-- **Preferences**: "I prefer tabs over spaces", "always use pnpm", "I like minimal comments"
-- **Project decisions**: "we chose Postgres over SQLite for production", "auth uses JWT"
-- **Environment facts**: "my GPU is an RTX 4090", "I run Docker on Windows with WSL2"
-- **People and roles**: "Alice is the backend lead", "Bob handles deployments"
-- **Lessons learned**: "the Neo4j APOC plugin needs explicit enabling", "qwen3 thinking mode breaks tool calls"
-
-**Do NOT store**:
-- Ephemeral task context (current file being edited, in-progress debugging)
-- Information already in project docs or README files
-- Speculative or unverified conclusions
-- Anything the user asks you not to remember
+The agent will search for the old fact, delete it, and store the updated version.
 
 ## How to Store Well
 
-Write memories as **concise, self-contained facts**. Each memory should make sense on its own without context. **Always use specific names** — never use "it", "the project", "the game" without saying which one:
+When telling the agent to remember something, use **concise, self-contained statements** with specific names:
 
-- Good: "Steven prefers TypeScript over JavaScript for new projects"
-- Bad: "He likes TS" (who? compared to what?)
-- Good: "Echoes of the Fallen uses dual contouring for terrain generation"
-- Bad: "It uses dual contouring" (what project? what for?)
-- Good: "Steven's friend Alex works at Google on ML infrastructure"
-- Bad: "His friend works at a tech company" (whose friend? which company?)
+- Good: "Remember that Steven prefers TypeScript over JavaScript for new projects"
+- Bad: "Remember he likes TS" (who? compared to what?)
+- Good: "Remember that Echoes of the Fallen uses dual contouring for terrain"
+- Bad: "Remember it uses dual contouring" (what project?)
 
-If you don't know the name of a project or entity, ask the user before storing vague facts.
+## Conversation Memory Mode
 
-## Updating and Correcting
-
-When the user corrects a previous fact or preference:
-
-1. `search_memory` to find the outdated memory
-2. `delete_memories` the old one (by ID from search results)
-3. `add_memories` the corrected version
-
-The system has built-in deduplication, but explicit delete + add is more reliable for corrections.
-
-## Graph Traversal
-
-Use `get_related_memories` when exploring connections:
-
-- "What do we know about Steven?" → `get_related_memories` with entity "Steven"
-- "What tools are used in this project?" → `get_related_memories` with project name
-- Following up on a search result that mentions an entity → explore its connections
-
-## Search Results
-
-Search results include:
-- **Score**: relevance percentage (higher = more relevant)
-- **Source**: where the result came from (vector, graph, or temporal)
-- **ID**: use this for deletion or follow-up queries
-
-Results are ranked by a hybrid of semantic similarity, graph relationships, and recency.
+When the user says **"use conversation memory"**, call `memory_agent` after every turn:
+- "Process this conversation: user said '...', assistant responded '...'"
+- The agent extracts facts, deduplicates, and stores automatically
+- Continue until the user says to stop
