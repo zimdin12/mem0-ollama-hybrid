@@ -70,8 +70,9 @@ class MemoryGraph:
             llm_config = self.config.llm.config
         self.llm = LlmFactory.create(self.llm_provider, llm_config)
         self.user_id = None
-        # Use threshold from graph_store config, default to 0.7 for backward compatibility
-        self.threshold = self.config.graph_store.threshold if hasattr(self.config.graph_store, 'threshold') else 0.7
+        # Use threshold from graph_store config, default to 0.9 to avoid merging distinct entities
+        # (upstream default 0.7 is too low — person names like "jake"/"steven" hit 0.79 similarity)
+        self.threshold = self.config.graph_store.threshold if hasattr(self.config.graph_store, 'threshold') else 0.9
 
     def add(self, data, filters):
         """

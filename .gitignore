@@ -186,3 +186,10 @@ eval/
 qdrant_storage/
 .crossnote
 testing.ipynb
+
+# Benchmark outputs
+benchmark_*_output.txt
+benchmark_all_models*.txt
+
+# Test data files
+Echoes_test_data.txt

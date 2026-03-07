@@ -649,6 +649,77 @@ async def get_memory(
     return response
 
 
+class DeleteAllRequest(BaseModel):
+    user_id: str
+
+
+@router.post("/delete_all")
+async def delete_all_memories(
+    request: DeleteAllRequest,
+    db: Session = Depends(get_db)
+):
+    """Delete ALL memories for a user (vector store + SQLite + graph)."""
+    user = db.query(User).filter(User.user_id == request.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    try:
+        memory_client = get_memory_client()
+        if not memory_client:
+            raise HTTPException(status_code=503, detail="Memory client is not available")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Memory service unavailable: {str(e)}")
+
+    # Get all active memories
+    user_memories = db.query(Memory).filter(
+        Memory.user_id == user.id,
+        Memory.state != MemoryState.deleted,
+    ).all()
+
+    deleted_count = 0
+    for memory in user_memories:
+        try:
+            memory_client.delete(memory_id=str(memory.id))
+        except Exception as e:
+            logging.warning(f"Failed to delete {memory.id} from vector store: {e}")
+        memory.state = MemoryState.deleted
+        memory.deleted_at = datetime.now(UTC)
+        deleted_count += 1
+
+    # Also clean any orphaned Qdrant points for this user (from previous buggy deletes)
+    try:
+        qdrant = QdrantClient(
+            host=os.environ.get("QDRANT_HOST", "mem0_store"),
+            port=int(os.environ.get("QDRANT_PORT", 6333)),
+        )
+        collection = os.environ.get("QDRANT_COLLECTION", "openmemory")
+        qdrant.delete(
+            collection_name=collection,
+            points_selector=Filter(
+                must=[FieldCondition(key="user_id", match=MatchValue(value=request.user_id))]
+            ),
+        )
+    except Exception as e:
+        logging.warning(f"Failed to clean orphaned Qdrant points: {e}")
+
+    # Clear Neo4j graph for this user
+    try:
+        if memory_client and hasattr(memory_client, 'graph') and memory_client.graph:
+            graph = memory_client.graph
+            if hasattr(graph, 'graph') and hasattr(graph.graph, 'query'):
+                graph.graph.query(
+                    "MATCH (n) WHERE n.user_id = $user_id DETACH DELETE n",
+                    params={"user_id": request.user_id}
+                )
+    except Exception as e:
+        logging.warning(f"Failed to clear graph: {e}")
+
+    db.commit()
+    return {"message": f"Deleted {deleted_count} memories", "count": deleted_count}
+
+
 class DeleteMemoriesRequest(BaseModel):
     memory_ids: List[UUID]
     user_id: str
@@ -700,7 +771,7 @@ async def delete_memories(
 
         # Delete from vector store
         try:
-            memory_client.delete(memory_id=str(memory_id), user_id=request.user_id)
+            memory_client.delete(memory_id=str(memory_id))
         except Exception as delete_error:
             logging.warning(f"Failed to delete memory {memory_id} from vector store: {delete_error}")
 

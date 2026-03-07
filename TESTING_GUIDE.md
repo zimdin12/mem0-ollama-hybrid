@@ -11,7 +11,19 @@ docker compose build openmemory-mcp && docker compose up -d openmemory-mcp
 
 Wait ~10s for the API to be ready, then verify: `curl -s http://localhost:8765/health`
 
+---
+
 ## 1. Clear All Databases
+
+Use the REST endpoint (clears Qdrant, Neo4j, and SQLite in one call):
+
+```bash
+curl -s -X POST http://localhost:8765/api/v1/memories/delete_all \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"steven"}'
+```
+
+Or manually:
 
 ```bash
 # Qdrant — delete and recreate collection
@@ -193,3 +205,182 @@ Test via the MCP SSE endpoint (if connected) or curl the MCP server directly:
 | Duplicate facts after re-insert | Dedup threshold too high (>0.85) or embedding model changed |
 | Graph empty after insert | Graph extraction running async — wait 5-10s and recheck |
 | Search returns only vector results | Neo4j down, or graph search entity extraction failing |
+| "User prefers..." instead of "Steven prefers..." | `conversation_memory` pipeline missing I/User replacement |
+| Facts starting with "The" without subject | Dense chunk context injection not prepending topic |
+
+---
+
+## 7. LLM Model Evaluation & Fine-Tuning
+
+This section covers how to evaluate new extraction LLMs, fine-tune sampling parameters,
+and validate that a model switch doesn't regress quality.
+
+### 7.1 Requirements for Extraction LLMs
+
+The extraction pipeline needs models that can:
+- Output **valid JSON** reliably (both fact lists and graph entity/relationship structures)
+- Follow **system prompt instructions** precisely (not override with default behavior)
+- Handle **structured extraction** without hallucinating extra entities or facts
+- Work within **~4K output tokens** (extraction responses are short)
+
+**Models that DON'T work** (tested and confirmed):
+- **Thinking/reasoning models** (phi4-mini-reasoning, lfm2.5-thinking, exaone-deep, deepscaler) — emit thinking tokens that break JSON parsing, produce 5-10x more output than needed
+- **Distilled models** (Crow-4B) — ignore system prompts entirely, generate unrelated content
+- **Models without instruct tuning** — may not follow JSON format instructions
+
+**Models that DO work** (tested):
+- qwen3 family (4b instruct, 3.5:4b, 3.5:9b)
+- ministral-3:3b
+- gemma3:4b (works but has noise leaks)
+- granite4:3b (works but has fact splitting issues)
+
+### 7.2 Model Switching at Runtime
+
+Switch the extraction LLM without restarting the container:
+
+```bash
+# Switch model + sampling config
+curl -s -X PUT http://localhost:8765/api/v1/config/mem0/llm \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "ollama",
+    "config": {
+      "model": "NEW_MODEL_NAME",
+      "ollama_base_url": "http://ollama:11434",
+      "temperature": 0.3,
+      "top_p": 0.8,
+      "top_k": 20
+    }
+  }'
+```
+
+The API calls `reset_memory_client()` internally, which rebuilds the mem0 client with the new model. No container restart needed.
+
+**Important**: The config API change is runtime-only. To persist across container restarts, also update `LLM_MODEL` in `docker-compose.yml`.
+
+### 7.3 Per-Model Sampling Configs
+
+Each model family has tuned sampling parameters in `openmemory/api/model_configs.py`.
+The system auto-detects the family from the model name.
+
+Current tuned configs:
+
+| Family | Temp | top_p | top_k | PP | Notes |
+|--------|------|-------|-------|----|-------|
+| qwen3 | 0.7 | 0.8 | 20 | - | Reliable. Sensitive to low temps (lost 14 rels at t=0.15) |
+| qwen3.5:4b | 0.15 | 0.8 | 20 | 0.5 | Best graph (184 edges). pp=0.5 sweet spot |
+| qwen3.5 (9b+) | 0.1 | 0.8 | 20 | 1.5 | Original config was best. Config-insensitive |
+| ministral | 0.05 | 0.8 | 40 | - | Best raw score. Very low temp works here |
+
+To add a new model family:
+1. Add an entry to `MODEL_CONFIGS` in `model_configs.py`
+2. Set `LLM_MODEL` env var to the Ollama model name
+3. Optionally set `LLM_FAMILY` env var if auto-detection doesn't match
+
+### 7.4 Benchmark Scripts
+
+All benchmarks run inside the container. Copy and execute:
+
+```bash
+docker cp SCRIPT.py openmemory-mcp:/usr/src/openmemory/ && \
+MSYS_NO_PATHCONV=1 docker exec openmemory-mcp python3 /usr/src/openmemory/SCRIPT.py
+```
+
+| Script | Purpose | When to use |
+|--------|---------|-------------|
+| `benchmark_models.py` | Raw extraction quality across 9+ models. Tests prompts + filters directly via Ollama API (no mem0 pipeline). Measures facts, relationships, noise rejection, multi-person attribution. | Evaluating a **new model** you haven't tested before |
+| `benchmark_finetune.py` | Parameter grid search. Tests multiple temp/top_k/top_p/presence_penalty combos per model. Scores each config on 11 standardized tests. | **Tuning sampling params** after selecting a model |
+| `benchmark_system.py` | End-to-end pipeline test (13 phases). Tests the full API: insert -> dedup -> search -> graph -> pagination. Switches models via config API, clears all stores between models. | Validating a model works through the **full pipeline** |
+| `benchmark_extended.py` | Deep quality inspection (62 inserts, 13 categories). Dumps all stored facts for manual review. Checks for first-person leaks, "User" refs, context-stripped facts, hallucinations. 15 search quality tests. | **Final validation** before switching production model |
+
+### 7.5 Step-by-Step: Evaluating a New Model
+
+#### Step 1: Pull the model
+```bash
+docker exec ollama ollama pull NEW_MODEL:TAG
+```
+
+#### Step 2: Raw extraction test
+Run `benchmark_models.py` with the new model added to its `MODELS` list.
+Look for:
+- **Facts extracted**: Should be 40-55 from the standard test set (not 100+ which indicates noise)
+- **Relationships**: Should be 20+ with correct source->target direction
+- **Noise rejection**: Should score 5/5 (rejects irrelevant content)
+- **Multi-person**: Should correctly attribute Jake to devops (tests entity disambiguation)
+- **Speed**: Should complete 11 tests in under 60 seconds total
+
+**Red flags** (immediate disqualification):
+- 0 relationships (model can't do graph extraction)
+- 100+ facts (model hallucinates or doesn't follow extraction rules)
+- Noise score < 3/5 (model extracts from irrelevant content)
+- Multi-person attribution wrong (model can't disambiguate entities)
+
+#### Step 3: Parameter tuning
+If the model passes Step 2, run `benchmark_finetune.py` with configs to test.
+Start with the default (`temperature: 0.3, top_p: 0.8, top_k: 20`) and vary one param at a time:
+- Temperature: try 0.05, 0.1, 0.15, 0.3, 0.5, 0.7
+- top_k: try 20, 40, 64
+- presence_penalty: try 0 (none), 0.5, 1.0, 1.5
+
+Pick the config with the highest combined score (facts + relationships + noise + multi-person).
+
+#### Step 4: Pipeline test
+Add the model + best config to `benchmark_system.py`'s `MODELS` list and run it.
+This tests the full API pipeline. Look for:
+- **Memory count**: Should be 40-50 from the standard test set
+- **Search**: 13/13 queries should return relevant results
+- **Graph**: 50+ nodes, 100+ edges, diverse entity types
+- **Self-refs**: 0 self-referential edges
+- **Dedup**: 0 duplicate entries after re-insert
+- **Speed**: Full run should complete in under 60 seconds
+
+#### Step 5: Deep quality check
+Run `benchmark_extended.py` for the final validation. Inspect the memory dump for:
+- **First-person leaks**: Facts saying "I" or "my" instead of "Steven"
+- **"User" references**: Facts saying "User prefers" instead of "Steven prefers"
+- **Context-stripped facts**: Facts starting with "The" that lost their subject
+- **Hallucinations**: Facts not present in the input text
+
+#### Step 6: Switch production model
+```bash
+# Runtime switch
+curl -s -X PUT http://localhost:8765/api/v1/config/mem0/llm \
+  -H "Content-Type: application/json" \
+  -d '{"provider":"ollama","config":{"model":"NEW_MODEL:TAG","ollama_base_url":"http://ollama:11434"}}'
+
+# Persist in docker-compose.yml
+# Change LLM_MODEL=NEW_MODEL:TAG in openmemory-mcp environment section
+
+# Add config to model_configs.py
+# Add entry with family name, patterns, and tuned options
+
+# Pull model on startup (optional)
+# Add pull command to ollama service's startup script in docker-compose.yml
+```
+
+### 7.6 Key Findings from Benchmarking
+
+- **Prompt quality > sampling config**: Graph prompt fixes improved scores by +76 points. Config tuning improved scores by +5-15 points. Always fix prompts first.
+- **All tested models produce 90%+ identical output** after prompt fixes. Differences are at the margins (1-2 facts, 5-10 graph edges).
+- **Config sensitivity drops to near-zero** with good prompts. Bad prompts amplify config differences.
+- **Speed is nearly identical** across 3-9B models on RTX 4090 (~0.4-0.9s per insert). Model size matters less than prompt complexity.
+- **instruct variants matter for qwen3** (thinking mode breaks JSON). qwen3.5 doesn't have this issue.
+- **Dense chunks are the hardest test**: Long texts with many entities stress context injection, fact splitting, and graph extraction simultaneously.
+
+### 7.7 Clearing Ollama Context Between Models
+
+When benchmarking multiple models, clear the previous model from VRAM:
+
+```bash
+# Unload current model from Ollama
+curl -s -X POST http://ollama:11434/api/generate \
+  -d '{"model":"CURRENT_MODEL","keep_alive":0}'
+
+# Wait for VRAM to free
+sleep 5
+
+# Load new model (first request will trigger load)
+```
+
+The benchmark scripts handle this automatically, but it's important for manual testing too.
+Ollama's `OLLAMA_MAX_LOADED_MODELS=3` allows keeping multiple models loaded if VRAM permits.

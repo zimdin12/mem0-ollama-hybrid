@@ -48,10 +48,17 @@ Searching for *"what GPU does Steven use"* returns results from both the vector 
 
 | Role | Model | Size | Notes |
 |------|-------|------|-------|
-| Fact & entity extraction | `qwen3:4b-instruct-2507-q4_K_M` | ~2.5 GB | Must be `instruct` variant (thinking mode breaks tool calls) |
+| Fact & entity extraction | `qwen3.5:4b` | ~2.7 GB | Best graph quality (184 edges) of 4 tested models |
 | Embeddings | `qwen3-embedding:0.6b` | ~0.5 GB | 1024 dimensions, cosine similarity |
 
 Both run on GPU via Ollama. Total VRAM: ~3 GB.
+
+Other tested extraction models (all within 6% of each other):
+- `ministral-3:3b` — best raw benchmark score, richest graph edges
+- `qwen3.5:9b` — solid all-rounder, uses more VRAM
+- `qwen3.5:4b` — reliable, must use `instruct` variant (thinking mode breaks JSON)
+
+See `TESTING_GUIDE.md` section 7 for how to evaluate and switch models.
 
 ## Deployment
 
@@ -67,7 +74,7 @@ git clone https://github.com/zimdin12/mem0-ollama-hybrid.git
 cd mem0-ollama-hybrid
 
 # 2. Pull Ollama models (requires Ollama running on the host)
-ollama pull qwen3:4b-instruct-2507-q4_K_M
+ollama pull qwen3.5:4b
 ollama pull qwen3-embedding:0.6b
 
 # 3. Copy env files
@@ -128,7 +135,7 @@ OLLAMA_BASE_URL=http://ollama:11434
 
 # === LLM (fact & entity extraction) ===
 LLM_PROVIDER=ollama
-LLM_MODEL=qwen3:4b-instruct-2507-q4_K_M   # Any Ollama chat model works
+LLM_MODEL=qwen3.5:4b   # Any Ollama chat model works
 
 # === Embeddings ===
 EMBEDDER_PROVIDER=ollama
@@ -155,10 +162,12 @@ all Ollama output formats automatically.
 
 **To change the extraction LLM** (affects fact/entity quality):
 ```env
-LLM_MODEL=llama3.1:8b          # or glm4:9b, magistral:24b, etc.
+LLM_MODEL=ministral-3:3b       # or llama3.1:8b, glm4:9b, etc.
 ```
-Bigger models = better entity extraction quality but slower. The 4B sweet spot balances
-speed (~3s graph extraction) with quality (79+ entities from test data).
+Bigger models = better entity extraction quality but slower. The 3-4B sweet spot balances
+speed (~0.5s per fact) with quality (45+ memories from standard test data).
+
+See `TESTING_GUIDE.md` section 7 for the full model evaluation workflow.
 
 **To change the embedding model** (affects search quality):
 ```env
@@ -391,7 +400,7 @@ Upstream mem0 defaults to OpenAI for everything. This fork replaces all cloud de
 
 | Area | Upstream | This Fork |
 |------|----------|-----------|
-| LLM | OpenAI GPT-4 | Ollama (any model — default qwen3:4b-instruct) |
+| LLM | OpenAI GPT-4 | Ollama (any model — default qwen3.5:4b) |
 | Embeddings | OpenAI ada-002 | Ollama (any embedding model — default qwen3-embedding:0.6b, 1024d) |
 | Config | Hardcoded OpenAI keys | Environment variables (cascade: config.json → env) |
 | Categorization | OpenAI structured output | Ollama + manual JSON parsing |
@@ -444,7 +453,7 @@ For the full technical changelog, see [FORK_CHANGES.md](FORK_CHANGES.md).
 
 ## Performance
 
-Benchmarked on RTX 4090 with qwen3:4b + qwen3-embedding:0.6b:
+Benchmarked on RTX 4090 with qwen3.5:4b + qwen3-embedding:0.6b:
 
 | Operation | Latency | Notes |
 |-----------|---------|-------|

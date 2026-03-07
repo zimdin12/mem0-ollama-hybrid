@@ -96,7 +96,18 @@ storage (~0.5s). Graph populates within 10-30 seconds asynchronously for large d
 **Result**: 32 nodes with diverse types from a 17KB document (was 0 nodes when sent as
 one giant text — LLM couldn't handle the full context).
 
-## 4. Custom Prompts for Small Models (`openmemory/api/custom_update_prompt.py`)
+## 4. Per-Model Sampling Configs (`openmemory/api/model_configs.py`)
+
+**New file** providing tuned sampling parameters for each model family. Auto-detects
+family from model name (e.g., `qwen3.5:4b` → `qwen3.5:4b` config, `ministral-3:3b` → `ministral`).
+
+- Each family has tuned `temperature`, `top_p`, `top_k`, `presence_penalty`
+- `LLM_FAMILY` env var for explicit override
+- Sorted pattern matching (longest pattern first) for correct `qwen3.5:4b` vs `qwen3.5` vs `qwen3`
+- Fallback defaults for unknown models (`temperature: 0.3, top_p: 0.8, top_k: 20`)
+- 10 families configured: qwen3, qwen3.5:4b, qwen3.5, ministral, granite, gemma, phi, lfm, exaone, deepscaler, llama
+
+## 5. Custom Prompts for Small Models (`openmemory/api/custom_update_prompt.py`)
 
 Default mem0 prompts are designed for GPT-4 and are too verbose for 4B models.
 
@@ -108,7 +119,7 @@ Three optimized prompts:
 - **Graph relationships**: Dynamic entity types with hierarchy rules, concrete example output,
   relationship verbs (develops, features, uses, built_with, has_skill, has_hobby, etc.)
 
-## 5. Core mem0 Library Changes
+## 6. Core mem0 Library Changes
 
 ### `mem0/memory/main.py`
 - Added `graph: bool = True` parameter to `Memory.add()`
@@ -123,7 +134,7 @@ Three optimized prompts:
   before creating edges. Prevents self-loops when different entity names (e.g., "water" and
   "water element") resolve to the same physical node via embedding similarity.
 
-## 6. MCP Server Enhancements (`openmemory/api/app/mcp_server.py`)
+## 7. MCP Server Enhancements (`openmemory/api/app/mcp_server.py`)
 
 ### Tools (7 total)
 
@@ -180,7 +191,7 @@ useful content. Replaced with a filler-phrase exclusion filter (skips "sure", "l
 Improved query entity extraction: strips punctuation, expanded stopwords list. Prevents
 issues like `"steven?"` not matching `"steven"` in Neo4j CONTAINS queries.
 
-## 7. Config Loading Hierarchy (`openmemory/api/app/utils/memory.py`)
+## 8. Config Loading Hierarchy (`openmemory/api/app/utils/memory.py`)
 
 Upstream loads config from database only. This fork uses a cascade:
 
@@ -197,7 +208,7 @@ Auto-detects Ollama URL when running in Docker:
 3. Docker bridge gateway from `/proc/net/route` (Linux)
 4. Fallback: `172.17.0.1`
 
-## 8. Config Files (`openmemory/api/config.json`)
+## 9. Config Files (`openmemory/api/config.json`)
 
 All provider fields use `env:VARIABLE_NAME` pattern:
 - `LLM_PROVIDER`, `LLM_MODEL`, `OLLAMA_BASE_URL`
@@ -208,7 +219,7 @@ All provider fields use `env:VARIABLE_NAME` pattern:
 Added `graph_store` section (Neo4j) and `vector_store` section (Qdrant) which were
 absent from upstream config.
 
-## 9. Categorization (`openmemory/api/app/utils/categorization.py`)
+## 10. Categorization (`openmemory/api/app/utils/categorization.py`)
 
 Upstream uses hardcoded `OpenAI()` client with `gpt-4o-mini` and structured output
 (`beta.chat.completions.parse`).
@@ -219,7 +230,7 @@ Fork uses:
 - Manual JSON parsing with markdown code block fallback
 - Returns empty list on failure (non-fatal)
 
-## 10. MEMORY_MODE: Advanced vs Simple
+## 11. MEMORY_MODE: Advanced vs Simple
 
 **Env var**: `MEMORY_MODE` (default: `advanced`)
 
@@ -266,7 +277,7 @@ In `simple` mode, falls back to SQLite `ILIKE` search with score 1.0 and source 
 MCP server tools (`delete_memories`, `search_memory`, `add_memories`) respect the same
 `MEMORY_MODE` setting and return equivalent rich responses.
 
-## 11. Memory Router (`openmemory/api/app/routers/memories.py`)
+## 12. Memory Router (`openmemory/api/app/routers/memories.py`)
 
 ### New Graph Endpoints
 - `GET /graph/stats` — Entity/relationship counts
@@ -281,8 +292,9 @@ MCP server tools (`delete_memories`, `search_memory`, `add_memories`) respect th
 - `CreateMemoryRequest` accepts `messages[]` (conversation format)
 - DELETE events from mem0 sync to SQLite state (no phantom entries)
 - `POST /sync-storage` — Bi-directional sync between Qdrant and SQLite
+- `POST /delete_all` — Bulk deletion clearing all 3 stores (Qdrant by user_id filter, Neo4j DETACH DELETE, SQLite state→deleted)
 
-## 12. Database (`openmemory/api/app/database.py`)
+## 13. Database (`openmemory/api/app/database.py`)
 
 SQLite persistence fix:
 ```python
@@ -291,7 +303,7 @@ os.makedirs("db", exist_ok=True)
 ```
 Ensures `./db/` directory exists for Docker volume mounting (`openmemory-db` volume).
 
-## 13. Docker Compose Override (`openmemory/docker-compose.override.yml`)
+## 14. Docker Compose Override (`openmemory/docker-compose.override.yml`)
 
 - **Neo4j 5.26.4**: Graph database with APOC plugin, ports 8474/8687, healthcheck
 - **Qdrant init**: Pre-creates `openmemory` collection (1024-dim cosine)
@@ -299,25 +311,44 @@ Ensures `./db/` directory exists for Docker volume mounting (`openmemory-db` vol
 - Shared `openmemory_network` bridge network
 - Service dependency ordering with healthchecks
 
-## 14. Qdrant Init Script (`openmemory/init-qdrant.sh`)
+## 15. Qdrant Init Script (`openmemory/init-qdrant.sh`)
 
 Waits for Qdrant readiness, then creates `openmemory` collection with 1024-dim Cosine
 vectors. Lets mem0 auto-create `mem0migrations` collection. Non-fatal if collection exists.
 
-## 15. Requirements Changes
+## 16. Requirements Changes
 
 ### `openmemory/api/requirements.txt`
 - Added `langchain-neo4j` — Required for mem0's Neo4j graph store
 - Added `rank-bm25` — BM25 text search for hybrid search
 
-## 16. Test Suite (`test_memory_system.py`)
+## 17. Test & Benchmark Suites
 
+### `test_memory_system.py` — Unit test suite
 5-phase comprehensive test:
 1. **Insert**: 12 chunks of varied sizes (short/medium/long, dense/sparse, + duplicate test)
 2. **Validate**: Verify Qdrant vectors, Neo4j nodes/rels, SQLite memories all match
 3. **Graph quality**: List all entities/relationships, check for garbage (file extensions)
 4. **Search quality**: 10 diverse queries, verify correct top result, measure graph contribution
 5. **Dedup quality**: Check for exact duplicates and broken fragments in Qdrant
+
+### `benchmark_models.py` — Cross-model raw extraction
+Tests 9+ models through the Ollama API with production prompts and filters (no mem0 pipeline).
+Measures facts, relationships, noise rejection, multi-person attribution, and speed.
+Used for initial model screening.
+
+### `benchmark_finetune.py` — Parameter grid search
+Tests multiple sampling config combos (temp, top_k, top_p, presence_penalty) per model.
+Scores each config on 11 standardized tests. Used to find optimal params after model selection.
+
+### `benchmark_system.py` — End-to-end pipeline benchmark
+13 test phases through the full API: insert, dedup, search, graph, pagination, chain connectivity.
+Switches models via config API, clears all stores between models. Used for pipeline validation.
+
+### `benchmark_extended.py` — Deep quality inspection
+62 inserts across 13 categories. Dumps all stored facts for manual review. Checks for first-person
+leaks, "User" refs, context-stripped facts, hallucinations. 15 search quality tests with expected
+keywords. Per-category speed tracking. Used for final validation before production switch.
 
 ---
 
@@ -344,9 +375,14 @@ Three layers prevent duplicate storage:
 | `openmemory/init-qdrant.sh` | ~20 | Collection initialization |
 | `mcp-server/server.js` | ~200 | Standalone MCP server (stdio) |
 | `mcp-server/SKILL.md` | ~50 | Claude Code skill definition |
+| `openmemory/api/model_configs.py` | ~210 | Per-model-family sampling configs with auto-detection |
 | `test_memory_system.py` | ~300 | 5-phase test suite |
 | `test_comprehensive.py` | ~355 | 6-phase test suite (bulk, conversation, search, dedup, graph, qdrant) |
-| `TESTING_GUIDE.md` | ~180 | Testing checklist for extraction pipeline changes |
+| `benchmark_models.py` | ~400 | Cross-model raw extraction benchmark (9+ models) |
+| `benchmark_finetune.py` | ~350 | Parameter grid search per model family |
+| `benchmark_system.py` | ~500 | End-to-end pipeline benchmark (13 phases, model switching) |
+| `benchmark_extended.py` | ~600 | Deep quality inspection (62 inserts, 13 categories, memory dump) |
+| `TESTING_GUIDE.md` | ~300 | Testing checklist + LLM evaluation & fine-tuning guide |
 
 ### Modified (vs upstream)
 

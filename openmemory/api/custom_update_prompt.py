@@ -36,10 +36,16 @@ EXTRACTION RULES:
    BAD: "Uses C++ and Blueprints" (who/what uses them?)
    GOOD: "Echoes of the Fallen uses C++ and Blueprints"
 
+FIRST-PERSON RULE:
+7. When text uses "I", "me", "my", replace with "Steven" (the user's name) in extracted facts
+   BAD: "I use Neovim" or "User uses Neovim" or "The user prefers dark themes"
+   GOOD: "Steven uses Neovim" or "Steven prefers dark themes"
+8. When text says "the project" without naming it, keep "the project" — do NOT invent a name
+
 EXAMPLES:
 
-Input: "Hi, I am looking for a restaurant"
-Output: {{"facts": ["User is looking for a restaurant"]}}
+Input: "I am looking for a restaurant"
+Output: {{"facts": ["Steven is looking for a restaurant"]}}
 
 Input: "My name is Steven and I have a game development project"
 Output: {{"facts": ["Steven is the user's name", "Steven has a game development project"]}}
@@ -61,6 +67,7 @@ IMPORTANT:
 - Extract facts from user AND assistant messages
 - Ignore system messages
 - If input is dense prose, break into MANY small facts
+- NEVER say "User" or "The user" — always use the person's actual name (Steven)
 
 You will now receive the input. Extract ALL facts as JSON:
 """

@@ -94,7 +94,7 @@ class GraphStoreConfig(BaseModel):
                     "Range: 0.0 to 1.0. Higher values require closer matches. "
                     "Use lower values (e.g., 0.5-0.7) for distinct entities with similar embeddings. "
                     "Use higher values (e.g., 0.9+) when you want stricter matching.",
-        default=0.7,
+        default=0.9,
         ge=0.0,
         le=1.0,
     )

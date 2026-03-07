@@ -5,10 +5,23 @@ Provides hybrid search, smart memory addition, and relationship analysis.
 
 import json
 import logging
+import os
 import re
 import uuid
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
+
+
+def _strip_json_fences(text):
+    """Strip markdown code fences from JSON output (qwen3.5+ models add these)."""
+    text = text.strip()
+    if text.startswith('```'):
+        first_nl = text.find('\n')
+        if first_nl != -1:
+            text = text[first_nl + 1:]
+        if text.rstrip().endswith('```'):
+            text = text.rstrip()[:-3].rstrip()
+    return text
 from dataclasses import dataclass
 
 from app.database import SessionLocal
@@ -242,8 +255,13 @@ class EnhancedMemoryManager:
         # 2. Extract facts from new text
         #    Short inputs (under 100 chars, single sentence) bypass extraction —
         #    they are already a single fact and shouldn't be filtered by min length.
-        if len(text.strip()) < 100 and len(text.strip()) >= 10 and '\n' not in text.strip():
-            new_facts = [text.strip()]
+        #    LLM noise check filters greetings/filler in any language.
+        stripped = text.strip()
+        if len(stripped) < 100 and len(stripped) >= 10 and '\n' not in stripped:
+            if self._llm_is_noise(stripped):
+                new_facts = []
+            else:
+                new_facts = [stripped]
         else:
             new_facts = self._extract_facts(text)
         # 2b. Inject topic context into orphaned facts (fast heuristic)
@@ -489,6 +507,40 @@ class EnhancedMemoryManager:
 
         return result
 
+    def _llm_is_noise(self, text: str) -> bool:
+        """Use LLM to check if short text is noise (greetings, filler, etc). Language-agnostic."""
+        import requests
+        ollama_url = os.environ.get('OLLAMA_BASE_URL', 'http://ollama:11434')
+        model = os.environ.get('LLM_MODEL', 'qwen3:4b-instruct-2507-q4_K_M')
+        from fix_graph_entity_parsing import _detect_model_family, _get_llm_options
+        options = _get_llm_options(_detect_model_family(model))
+        try:
+            resp = requests.post(f'{ollama_url}/api/chat', json={
+                'model': model,
+                'messages': [
+                    {'role': 'system', 'content': 'You classify text for a memory system. Respond with JSON only.'},
+                    {'role': 'user', 'content': (
+                        'Does this text state a FACT about someone or something? '
+                        'KEEP only if it declares a preference, skill, decision, project detail, or personal info. '
+                        'DROP if it is: a greeting, small talk, weather, daily routine, '
+                        'a question, a request/command (even if it mentions technologies like "search Python" '
+                        'or "show me Rust"), or an acknowledgment ("ok", "thanks", "got it"). '
+                        'The key test: does it TELL something new, or does it ASK/REQUEST something?\n\n'
+                        f'Text: "{text}"\n\nRespond: {{"keep": true/false}}'
+                    )},
+                ],
+                'stream': False, 'format': 'json', 'think': False, 'options': options,
+            }, timeout=10)
+            if resp.status_code == 200:
+                result = json.loads(resp.json()['message']['content'])
+                is_noise = not result.get('keep', True)
+                if is_noise:
+                    logging.info(f"LLM noise filter: dropped '{text[:60]}'")
+                return is_noise
+        except Exception as e:
+            logging.warning(f"LLM noise check failed: {e}")
+        return False  # Default: not noise (don't lose data)
+
     def _llm_review_facts(self, candidate_facts: List[str],
                            source_text: str = "",
                            user_id: str = "", client_name: str = "",
@@ -512,6 +564,11 @@ class EnhancedMemoryManager:
 
         ollama_url = os.environ.get('OLLAMA_BASE_URL', 'http://ollama:11434')
         model = os.environ.get('LLM_MODEL', 'qwen3:4b-instruct-2507-q4_K_M')
+
+        # Model-specific sampling options
+        from fix_graph_entity_parsing import _detect_model_family, _get_llm_options
+        family = _detect_model_family(model)
+        options = _get_llm_options(family)
 
         # Build conversation context from server-side session history
         session_context = self._get_session_context(user_id, client_name)
@@ -546,7 +603,7 @@ EXTRACTED FACTS:
 REVIEW TASK:
 Review the extracted facts above. Fix or improve them:
 1. Each fact MUST include its subject (person, project, entity name) — add it if missing
-2. DROP facts that are noise (filler, instructions, meta-commentary like "here is what I found")
+2. DROP facts that are noise — greetings, small talk, weather chat, daily routine without specifics, instructions to the AI, meta-commentary ("here is what I found"). A fact is ONLY worth keeping if it contains specific information about a person, project, preference, skill, or decision that would be useful to recall later.
 3. MERGE fragments that describe the same thing into one clear fact
 4. SPLIT compound facts that contain multiple distinct pieces of information
 5. Keep facts concise but self-contained (someone reading just the fact should understand it)
@@ -556,12 +613,14 @@ Return empty list if nothing is worth remembering: {{"facts": []}}"""
 
         try:
             system_prompt = (
-                "You are a fact reviewer for a memory system. "
+                "You are a strict fact reviewer for a memory system. "
                 "You receive conversation context and extracted facts. "
                 "Your job: ensure every fact is self-contained and includes its subject "
                 "(person, project, entity name). Use the conversation context to identify "
                 "what is being discussed and add missing subjects. "
-                "Drop noise and filler. Return only JSON."
+                "AGGRESSIVELY drop noise: greetings, small talk, weather, daily routine, "
+                "filler, instructions. Only keep facts with specific memorable information. "
+                "Return only JSON."
             )
 
             resp = requests.post(f'{ollama_url}/api/chat', json={
@@ -573,6 +632,7 @@ Return empty list if nothing is worth remembering: {{"facts": []}}"""
                 'stream': False,
                 'format': 'json',
                 'think': False,
+                'options': options,
             }, timeout=30)
 
             if resp.status_code != 200:
@@ -583,7 +643,7 @@ Return empty list if nothing is worth remembering: {{"facts": []}}"""
             msg = raw.get('message', {})
             content = msg.get('content', '') if isinstance(msg, dict) else str(msg)
 
-            parsed = json.loads(content)
+            parsed = json.loads(_strip_json_fences(content))
             reviewed = parsed.get('facts', [])
 
             if not isinstance(reviewed, list) or len(reviewed) == 0:

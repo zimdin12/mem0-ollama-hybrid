@@ -1,22 +1,42 @@
 """
-JSON-based graph extraction for qwen3:4b (replaces unreliable tool calling).
+JSON-based graph extraction (replaces unreliable tool calling).
 
-Problem: qwen3:4b cannot reliably use Ollama's tool/function calling format.
-Entity extraction returns empty tool_calls, relationship extraction fails.
-
-Solution: Use Ollama's `format: 'json'` mode with a single prompt that extracts
+Uses Ollama's `format: 'json'` mode with a single prompt that extracts
 both entities and relationships in one call. This is:
 - More reliable (JSON mode forces valid JSON output)
 - Faster (1 LLM call instead of 3-4)
 - Higher quality (LLM sees full context for both entities and relationships)
+
+Supports model detection: adjusts prompts and sampling params per model family.
 """
 
 import json
+import os
 import re
 import logging
 from mem0.memory.graph_memory import MemoryGraph
 
+def _strip_json_fences(text):
+    """Strip markdown code fences from JSON output (qwen3.5+ models add these)."""
+    text = text.strip()
+    if text.startswith('```'):
+        first_nl = text.find('\n')
+        if first_nl != -1:
+            text = text[first_nl + 1:]
+        if text.rstrip().endswith('```'):
+            text = text.rstrip()[:-3].rstrip()
+    return text
+
 logger = logging.getLogger(__name__)
+
+
+# --- Model detection (delegates to model_configs.py) ---
+
+from model_configs import detect_model_family, get_llm_options
+
+# Backwards-compatible aliases used by other files (enhanced_memory.py, benchmarks)
+_detect_model_family = detect_model_family
+_get_llm_options = get_llm_options
 
 # Save originals for potential restore
 _original_add = MemoryGraph.add
@@ -53,7 +73,8 @@ _BLOCKED_ENTITY_TYPES = frozenset([
 ])
 
 # Types that can be relationship sources (hub nodes that connect to everything else)
-_HUB_TYPES = frozenset(['person', 'project'])
+# Includes game_element because qwen3.5 often types game projects as game_element
+_HUB_TYPES = frozenset(['person', 'project', 'game_element'])
 
 # --- Prompt ---
 
@@ -72,7 +93,7 @@ You are free to use other types if they fit better. Just be specific — avoid v
 ENTITY QUALITY RULES:
 - Names should be 1-4 words, lowercase
 - Each entity should be something a person would want to look up or navigate to later
-- For self-references (I, me, my), use "USER_ID" as the entity name
+- IMPORTANT: When text uses "I", "me", "my" — create a "USER_ID" entity (type: person) and use it as the relationship source
 - If context mentions a specific project by name, connect related features/tech to THAT project, not to the person
 
 DO NOT create entities from:
@@ -81,9 +102,10 @@ DO NOT create entities from:
 - Quality levels or settings (full detail, low, medium, high, ultra)
 - URLs, paths, hostnames, env variables, config values
 - Generic words (utilities, default, metadata, mode)
+- Abstract descriptions of actions (e.g. "plain text", "output consistency", "number of calls")
 
 RELATIONSHIP RULES:
-Only "person" and "project" should be relationship SOURCES. Everything else is a target.
+Only "person", "project", and "game_element" should be relationship SOURCES. Everything else is a target.
 - person -> develops/builds -> project
 - person -> uses/prefers -> tool/technology/framework
 - person -> has_preference -> preference
@@ -95,10 +117,15 @@ Only "person" and "project" should be relationship SOURCES. Everything else is a
 - person -> lives_in -> place
 - project -> built_with -> technology/framework
 - project -> features/uses -> game_element/technology/tool
+- When a tool/technology connects to another tool/technology, route through the project instead
+  BAD: "voxel_plugin -> leverages -> nanite"  GOOD: "my_project -> uses -> nanite"
+- "built_with" and "features" should come FROM the project, never from a person
+  BAD: "steven -> built_with -> godot"  GOOD: "echoes_of_the_fallen -> built_with -> godot"
+  A person "develops" or "builds" a project. A project is "built_with" a technology.
 
 When text says "the game" or "the project", use the actual project name from context instead.
 
-EXAMPLE:
+EXAMPLE 1:
 Text: "Steven is a PHP developer building Echoes of the Fallen, a voxel roguelike. He prefers dark mode and uses vim. Alex works at Google. The game uses C++ and dual contouring. Steven also enjoys cooking."
 Output:
 {"entities": [
@@ -122,6 +149,20 @@ Output:
   {"source": "alex", "relation": "works_at", "target": "google"},
   {"source": "echoes of the fallen", "relation": "built_with", "target": "c++"},
   {"source": "echoes of the fallen", "relation": "features", "target": "dual contouring"}
+]}
+
+EXAMPLE 2 (first person — note I/me replaced with user name):
+Text: "I replaced the tool-calling pipeline with JSON mode. I use Neovim and prefer dark themes."
+Output:
+{"entities": [
+  {"name": "USER_ID", "type": "person"},
+  {"name": "json mode", "type": "technology"},
+  {"name": "neovim", "type": "tool"},
+  {"name": "dark themes", "type": "preference"}
+], "relationships": [
+  {"source": "USER_ID", "relation": "uses", "target": "json mode"},
+  {"source": "USER_ID", "relation": "uses", "target": "neovim"},
+  {"source": "USER_ID", "relation": "has_preference", "target": "dark themes"}
 ]}"""
 
 
@@ -139,10 +180,24 @@ def _json_extract_graph(self, data, filters, context=None):
 
     try:
         import requests
-        import os
 
         ollama_url = os.environ.get('OLLAMA_BASE_URL', 'http://ollama:11434')
         model = os.environ.get('LLM_MODEL', 'qwen3:4b-instruct-2507-q4_K_M')
+        family = _detect_model_family(model)
+        options = _get_llm_options(family)
+
+        # Universal extraction emphasis — helps all models produce complete graphs
+        prompt += (
+            "\n\nIMPORTANT: You MUST generate relationships for every entity. "
+            "Every entity should connect to at least one person or project via a relationship. "
+            "If an entity has no relationship, remove it from entities too."
+            "\nPreserve NEGATIONS: does_not_use, stopped_using, rejected, never_used (NOT just 'uses')."
+            "\nPreserve TEMPORAL state: formerly_worked_at vs currently_works_at, previously_used vs uses."
+            f"\nALWAYS include a \"{user_id}\" (type: person) entity. If text says \"the project\" or "
+            f"\"my project\", create \"{user_id}\" as source with relation \"uses\" to all technologies mentioned."
+            "\nNEVER use 'built_with' or 'features' with a person as source. "
+            "Only a project can be 'built_with' something. A person 'develops' or 'uses' things."
+        )
 
         # Build user message with optional conversation context
         user_content = data
@@ -160,6 +215,7 @@ def _json_extract_graph(self, data, filters, context=None):
                     + data
                 )
 
+        logger.info(f"Graph extraction using {model} (family={family})")
         resp = requests.post(f'{ollama_url}/api/chat', json={
             'model': model,
             'messages': [
@@ -169,6 +225,7 @@ def _json_extract_graph(self, data, filters, context=None):
             'stream': False,
             'format': 'json',
             'think': False,
+            'options': options,
         }, timeout=120)
 
         if resp.status_code != 200:
@@ -190,7 +247,17 @@ def _json_extract_graph(self, data, filters, context=None):
             logger.warning("Graph JSON extraction returned empty content")
             return {}, []
 
-        parsed = json.loads(content)
+        parsed = json.loads(_strip_json_fences(content))
+
+        # --- I/me/my → user_id normalization ---
+        _SELF_REFS = frozenset(['i', 'me', 'my', 'myself', 'user', 'the_user', 'the_subject', 'subject'])
+        user_id_key = user_id.lower().replace(' ', '_')
+
+        def _normalize_self_ref(name_key):
+            """Replace first-person references with the actual user_id."""
+            if name_key in _SELF_REFS:
+                return user_id_key
+            return name_key
 
         # --- Build entity_type_map with safety filters ---
         entity_type_map = {}
@@ -209,7 +276,11 @@ def _json_extract_graph(self, data, filters, context=None):
 
             # Normalize
             name_key = name.lower().replace(' ', '_')
+            name_key = _normalize_self_ref(name_key)
             etype_key = etype.lower().replace(' ', '_')
+            # If self-ref was resolved, force type to person
+            if name_key == user_id_key:
+                etype_key = 'person'
 
             # Hard filters (structural, not domain-specific)
             if name_key in _ENTITY_BLOCKLIST:
@@ -238,8 +309,8 @@ def _json_extract_graph(self, data, filters, context=None):
         for rel in raw_rels:
             if not isinstance(rel, dict):
                 continue
-            source = str(rel.get('source', '')).strip().lower().replace(' ', '_')
-            target = str(rel.get('target', '')).strip().lower().replace(' ', '_')
+            source = _normalize_self_ref(str(rel.get('source', '')).strip().lower().replace(' ', '_'))
+            target = _normalize_self_ref(str(rel.get('target', '')).strip().lower().replace(' ', '_'))
             relation = str(rel.get('relation', '')).strip().lower().replace(' ', '_')
 
             if not source or not target or not relation:
@@ -258,7 +329,6 @@ def _json_extract_graph(self, data, filters, context=None):
                 continue
 
             # Auto-add user_id as person if used in relationship (LLM often omits from entities)
-            user_id_key = user_id.lower().replace(' ', '_')
             if source not in entity_type_map:
                 if source == user_id_key:
                     entity_type_map[source] = 'person'
@@ -277,6 +347,11 @@ def _json_extract_graph(self, data, filters, context=None):
             if source_type not in _HUB_TYPES:
                 logger.info(f"Skipping relationship with non-hub source: {source} ({source_type}) -> {target}")
                 continue
+
+            # Fix misattributed built_with/features: person can't "build with" a tech
+            if source_type == 'person' and relation in ('built_with', 'features'):
+                relation = 'uses'
+                logger.info(f"Fixed relation: {source} --built_with--> {target} => --uses-->")
 
             relationships.append({
                 'source': source,
