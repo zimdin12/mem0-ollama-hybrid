@@ -550,9 +550,9 @@ async def conversation_memory(user_message: str, llm_response: str) -> str:
         return f"Error processing conversation: {e}"
 
 
-@mcp.tool(description="Ask a natural language question about stored memories. The Memory Brain agent autonomously searches vector store, knowledge graph, and SQLite to synthesize a comprehensive answer. Use for complex queries like: 'what hobbies does Steven have?', 'summarize what you know about project X', 'how are Steven and Docker related?'. Returns a synthesized answer, not raw search results.")
-async def memory_ask(request: str) -> str:
-    """Natural language memory query via brain agent (read-only)."""
+@mcp.tool(description="Talk to the Memory Agent in natural language. It autonomously searches, stores, deletes, or updates memories across all 3 databases (vector, graph, metadata). Examples: 'What hobbies does Steven have?', 'Steven has a girlfriend called Mirjam', 'Delete all memories about dark mode', 'Steven switched from UE5 to Godot'. The agent determines intent and chains tool calls as needed. Returns a synthesized answer.")
+async def memory_agent(request: str) -> str:
+    """Natural language memory operations via brain agent."""
     uid = user_id_var.get(None)
     if not uid:
         return "Error: user_id not provided"
@@ -562,7 +562,6 @@ async def memory_ask(request: str) -> str:
         result = brain_agent.run(
             request=request,
             user_id=uid,
-            read_only=True,
         )
         response = {
             "answer": result.answer,
@@ -575,37 +574,7 @@ async def memory_ask(request: str) -> str:
             response["error"] = result.error
         return json.dumps(response, indent=2)
     except Exception as e:
-        logging.exception(f"memory_ask error: {e}")
-        return f"Error: {e}"
-
-
-@mcp.tool(description="Perform a natural language memory operation: store, update, delete, or reorganize memories. The Memory Brain agent autonomously decides which tools to use. Examples: 'remember that Steven switched to Godot', 'delete all memories about dark mode', 'update Steven's GPU to RTX 5090'. Auto-confirmed — the LLM calling this has already decided to do it.")
-async def memory_do(request: str) -> str:
-    """Natural language memory operation via brain agent (read-write, auto-confirmed)."""
-    uid = user_id_var.get(None)
-    if not uid:
-        return "Error: user_id not provided"
-
-    try:
-        from app.brain.agent import brain_agent
-        result = brain_agent.run(
-            request=request,
-            user_id=uid,
-            read_only=False,
-            dry_run=False,
-        )
-        response = {
-            "answer": result.answer,
-            "steps": result.steps,
-            "tools_used": result.tools_called,
-            "success": result.success,
-            "elapsed_seconds": round(result.elapsed_seconds, 2),
-        }
-        if result.error:
-            response["error"] = result.error
-        return json.dumps(response, indent=2)
-    except Exception as e:
-        logging.exception(f"memory_do error: {e}")
+        logging.exception(f"memory_agent error: {e}")
         return f"Error: {e}"
 
 

@@ -2,7 +2,7 @@
 Phase 2 tests: Brain Agent Loop.
 
 Tests the MemoryBrainAgent with real Ollama calls.
-Requires: Ollama running with qwen3.5:9b (or BRAIN_LLM_MODEL), test data in Qdrant.
+Requires: Ollama running with LLM_MODEL, test data in Qdrant.
 
 Usage:
   # First, insert some test data
@@ -64,11 +64,11 @@ def run_tests():
 
     print("\n=== Phase 2: Brain Agent Loop Tests ===\n")
 
-    # --- Test 1: Read-only query ---
-    print("Test group: Read-only queries")
+    # --- Test 1: Read query ---
+    print("Test group: Read queries")
 
     def test_ask_gpu():
-        result = agent.run("What GPU does Steven use?", user_id=TEST_USER, read_only=True)
+        result = agent.run("What GPU does Steven use?", user_id=TEST_USER)
         assert result.success, f"Expected success, got error: {result.error}"
         assert result.answer, "Expected non-empty answer"
         assert len(result.tools_called) > 0, "Expected at least 1 tool call"
@@ -85,7 +85,6 @@ def run_tests():
         result = agent.run(
             "Remember that Steven recently started learning Zig programming language",
             user_id=TEST_USER,
-            read_only=False,
         )
         assert result.success, f"Expected success, got error: {result.error}"
         assert result.answer, "Expected non-empty answer"
@@ -96,59 +95,50 @@ def run_tests():
 
     test("store operation stores or deduplicates", test_store_memory)
 
-    # --- Test 3: Delete with dry run ---
+    # --- Test 3: Delete operation ---
     print("\nTest group: Delete operations")
 
-    def test_delete_dry_run():
+    def test_delete():
         result = agent.run(
             "Delete all memories about Zig",
             user_id=TEST_USER,
-            read_only=False,
-            dry_run=True,
         )
-        # Should either find destructive actions or find nothing to delete
-        if result.requires_confirmation:
-            assert result.planned_actions, "Expected planned_actions when requires_confirmation"
-            print(f"    Planned actions: {json.dumps(result.planned_actions, default=str)[:300]}")
-        else:
-            print(f"    No destructive actions planned (brain may not have found anything to delete)")
+        # Should search, find, and delete
+        assert result.answer, "Expected non-empty answer"
+        print(f"    Answer: {result.answer[:200]}")
         print(f"    Steps: {result.steps}, Tools: {result.tools_called}, Time: {result.elapsed_seconds:.1f}s")
 
-    test("delete dry run collects planned actions", test_delete_dry_run)
+    test("delete operation searches then deletes", test_delete)
 
     # --- Test 4: Max steps respected ---
     print("\nTest group: Safety limits")
 
     def test_max_steps():
-        # Create an agent with very low max_steps
         limited_agent = MemoryBrainAgent()
         limited_agent.max_steps = 2
         result = limited_agent.run(
             "Do a very thorough analysis of everything about Steven including all relationships and connections",
             user_id=TEST_USER,
-            read_only=True,
         )
         assert result.steps <= 2, f"Expected <= 2 steps, got {result.steps}"
         print(f"    Steps: {result.steps} (max_steps=2)")
 
     test("max_steps is respected", test_max_steps)
 
-    # --- Test 5: Read-only blocks writes ---
-    print("\nTest group: Access control")
+    # --- Test 5: No data found → early exit ---
+    print("\nTest group: Early exit")
 
-    def test_readonly_blocks_writes():
+    def test_no_data_early_exit():
         result = agent.run(
-            "Delete all memories about dark mode",
+            "What is the meaning of quantum chromodynamics in relation to Steven?",
             user_id=TEST_USER,
-            read_only=True,
         )
-        # In read-only mode, the brain should NOT use destructive tools
-        destructive = {"vector_delete", "graph_mutate", "sql_mutate", "vector_store"}
-        used_destructive = set(result.tools_called) & destructive
-        assert not used_destructive, f"Read-only mode used destructive tools: {used_destructive}"
-        print(f"    Tools used (all read-only): {result.tools_called}")
+        # Should exit reasonably quickly (not exhaust max_steps=12)
+        assert result.steps <= 8, f"Expected <= 8 steps for near-empty search, got {result.steps}"
+        print(f"    Answer: {result.answer[:200]}")
+        print(f"    Steps: {result.steps} (early exit)")
 
-    test("read-only mode blocks write tools", test_readonly_blocks_writes)
+    test("no data found exits early", test_no_data_early_exit)
 
     # --- Cleanup ---
     print("\n=== Cleanup ===")

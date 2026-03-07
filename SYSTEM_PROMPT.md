@@ -10,6 +10,14 @@ You have access to a persistent hybrid memory system via MCP tools. It combines 
 
 ### Memory Tools
 
+**Memory Agent (v2 — recommended for complex operations):**
+
+| Tool | When to use |
+|------|------------|
+| `memory_agent` | Talk to the memory agent in natural language. It autonomously searches, stores, deletes, or updates. Examples: "What does Steven use for coding?", "Steven switched from UE5 to Godot", "Delete all memories about dark mode". |
+
+**Direct Tools (v1 — faster, simpler):**
+
 | Tool | When to use |
 |------|------------|
 | `search_memory` | Recall facts, preferences, decisions, people, projects. Use `offset` to paginate (0, 10, 20...). Try different query angles for broader coverage. |

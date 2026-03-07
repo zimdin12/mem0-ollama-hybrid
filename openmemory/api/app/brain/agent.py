@@ -1,11 +1,11 @@
 """
-Memory Brain Agent — LLM agent loop for natural-language memory operations.
+Memory Brain Agent — autonomous LLM agent for natural-language memory operations.
 
-Accepts a natural-language request, runs tool calls in a loop via Ollama JSON mode,
-and returns a synthesized answer.
+v2 architecture: single endpoint, single model. The agent determines intent
+(search, store, delete, update) from the natural language request and uses
+whatever tools are needed.
 
-The agent uses qwen3.5:9b (configurable via BRAIN_LLM_MODEL env var) on the same
-Ollama instance as the extraction pipeline.
+Uses the same LLM_MODEL as the extraction pipeline (configurable via env var).
 """
 
 import json
@@ -42,9 +42,6 @@ class BrainResult:
     user_id: str = ""
     success: bool = True
     error: Optional[str] = None
-    # For confirmation flow
-    requires_confirmation: bool = False
-    planned_actions: Optional[List[Dict]] = None
     elapsed_seconds: float = 0.0
 
 
@@ -52,37 +49,32 @@ class MemoryBrainAgent:
     """
     LLM agent that sits between callers and the three databases.
     Accepts natural language. Decides which tools to call. Returns synthesized answer.
+
+    Single model, single endpoint. The agent determines intent from the request.
     """
 
-    DESTRUCTIVE_TOOLS = {"vector_delete", "graph_mutate", "sql_mutate"}
-
     def __init__(self):
-        self.model = os.environ.get("BRAIN_LLM_MODEL", "qwen3.5:9b")
-        self.ollama_url = os.environ.get("BRAIN_OLLAMA_URL", "http://ollama:11434")
+        # Use the same model as extraction pipeline — one model for everything
+        self.model = os.environ.get("LLM_MODEL", "qwen3.5:4b")
+        self.ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434")
         self.max_steps = int(os.environ.get("BRAIN_MAX_STEPS", "12"))
 
-    def run(
-        self,
-        request: str,
-        user_id: str,
-        read_only: bool = False,
-        dry_run: bool = False,
-    ) -> BrainResult:
+    def run(self, request: str, user_id: str) -> BrainResult:
         """
         Run the brain agent loop.
 
+        The agent has full read/write access. It determines from the request
+        whether to search, store, delete, or update.
+
         Args:
-            request: Natural language request from the user/caller.
+            request: Natural language request from the caller.
             user_id: User whose memories to operate on.
-            read_only: If True, only read tools are available.
-            dry_run: If True, collect destructive actions but don't execute them.
-                     Returns requires_confirmation=True with planned_actions.
 
         Returns:
             BrainResult with the answer, steps taken, and tools called.
         """
         start = time.time()
-        system_prompt = get_system_prompt(user_id, read_only=read_only)
+        system_prompt = get_system_prompt(user_id)
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -90,7 +82,6 @@ class MemoryBrainAgent:
         ]
 
         tools_called = []
-        planned_destructive = []
 
         for step in range(1, self.max_steps + 1):
             # Call Ollama
@@ -111,7 +102,6 @@ class MemoryBrainAgent:
             # Parse JSON response
             action = self._parse_response(response_text, messages, step)
             if action is None:
-                # Retry failed — return error
                 return BrainResult(
                     answer="Error: Failed to parse LLM response as JSON after retries.",
                     steps=step,
@@ -142,35 +132,12 @@ class MemoryBrainAgent:
             tool_args = action.get("args") or {}
 
             if not tool_name or tool_name not in TOOLS:
-                # Unknown tool — tell the brain
                 error_msg = f"Unknown tool: {tool_name}. Available: {', '.join(TOOLS.keys())}"
                 messages.append({"role": "assistant", "content": response_text})
                 messages.append({"role": "user", "content": json.dumps({"error": error_msg})})
                 continue
 
             tools_called.append(tool_name)
-
-            # Dry-run mode: collect destructive actions instead of executing
-            if dry_run and tool_name in self.DESTRUCTIVE_TOOLS:
-                planned_destructive.append({
-                    "tool": tool_name,
-                    "args": tool_args,
-                    "thinking": action.get("thinking", ""),
-                })
-                # Tell the brain it was "executed" so it can continue planning
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append({"role": "user", "content": json.dumps({
-                    "result": f"[DRY RUN] {tool_name} would be executed with args: {json.dumps(tool_args)}"
-                })})
-                continue
-
-            # Read-only mode: block write tools
-            if read_only and tool_name in self.DESTRUCTIVE_TOOLS | {"vector_store"}:
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append({"role": "user", "content": json.dumps({
-                    "error": f"Tool {tool_name} is not available in read-only mode."
-                })})
-                continue
 
             # Execute the tool
             try:
@@ -186,18 +153,6 @@ class MemoryBrainAgent:
             messages.append({"role": "user", "content": result_str})
 
         # Reached max steps
-        if dry_run and planned_destructive:
-            return BrainResult(
-                answer="Plan collected (dry run). Confirm to execute.",
-                steps=self.max_steps,
-                tools_called=tools_called,
-                user_id=user_id,
-                success=True,
-                requires_confirmation=True,
-                planned_actions=planned_destructive,
-                elapsed_seconds=time.time() - start,
-            )
-
         _log_audit("brain_run", user_id,
                    {"request": request[:500], "steps": self.max_steps, "tools": tools_called},
                    {"answer": "Reached step limit"})
@@ -252,7 +207,6 @@ class MemoryBrainAgent:
                 cleaned = _strip_json_fences(current_text)
                 parsed = json.loads(cleaned)
 
-                # Validate minimum structure
                 if not isinstance(parsed, dict):
                     raise ValueError("Response is not a JSON object")
                 if "final" not in parsed and "action" not in parsed:
@@ -263,7 +217,6 @@ class MemoryBrainAgent:
             except (json.JSONDecodeError, ValueError) as e:
                 if attempt < max_retries:
                     logger.warning(f"Brain step {step}, attempt {attempt+1}: JSON parse failed: {e}")
-                    # Ask the LLM to fix its output
                     messages.append({"role": "assistant", "content": current_text})
                     messages.append({"role": "user", "content": json.dumps({
                         "error": f"Invalid JSON: {str(e)}. You MUST respond with a single valid JSON object matching the schema: {{\"thinking\": \"...\", \"action\": \"tool_name\", \"args\": {{}}, \"final\": false}} or {{\"thinking\": \"...\", \"final\": true, \"answer\": \"...\"}}"
@@ -277,55 +230,6 @@ class MemoryBrainAgent:
                     return None
 
         return None
-
-    def run_confirmed(
-        self,
-        request: str,
-        user_id: str,
-        planned_actions: List[Dict],
-    ) -> BrainResult:
-        """
-        Execute previously planned destructive actions (from a dry_run).
-        Runs each planned tool call directly, then returns a summary.
-        """
-        start = time.time()
-        tools_called = []
-        results = []
-
-        for action in planned_actions:
-            tool_name = action["tool"]
-            tool_args = action.get("args", {})
-            tools_called.append(tool_name)
-
-            try:
-                tool_fn = TOOLS[tool_name]
-                result = tool_fn(**tool_args)
-                results.append({"tool": tool_name, "result": result})
-            except Exception as e:
-                results.append({"tool": tool_name, "error": str(e)})
-
-        # Summarize
-        summary_parts = []
-        for r in results:
-            if "error" in r:
-                summary_parts.append(f"- {r['tool']}: ERROR: {r['error']}")
-            else:
-                summary_parts.append(f"- {r['tool']}: {json.dumps(r['result'], default=str)[:200]}")
-
-        answer = f"Executed {len(planned_actions)} planned actions:\n" + "\n".join(summary_parts)
-
-        _log_audit("brain_run_confirmed", user_id,
-                   {"request": request[:500], "actions": len(planned_actions)},
-                   {"answer": answer[:500]})
-
-        return BrainResult(
-            answer=answer,
-            steps=len(planned_actions),
-            tools_called=tools_called,
-            user_id=user_id,
-            success=all("error" not in r for r in results),
-            elapsed_seconds=time.time() - start,
-        )
 
 
 # Module-level singleton

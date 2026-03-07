@@ -110,25 +110,13 @@ const TOOLS = [
     },
   },
   {
-    name: "memory_ask",
+    name: "memory_agent",
     description:
-      "Ask a natural language question about stored memories. The Memory Brain agent autonomously searches vector store, knowledge graph, and SQLite to synthesize a comprehensive answer. Use for complex queries like: 'what hobbies does Steven have?', 'summarize what you know about project X'.",
+      "Talk to the Memory Agent in natural language. It autonomously searches, stores, deletes, or updates memories across all 3 databases (vector, graph, metadata). Examples: 'What hobbies does Steven have?', 'Steven has a girlfriend called Mirjam', 'Delete all memories about dark mode'. The agent determines intent and chains tool calls as needed.",
     inputSchema: {
       type: "object",
       properties: {
-        request: { type: "string", description: "Natural language question about memories" },
-      },
-      required: ["request"],
-    },
-  },
-  {
-    name: "memory_do",
-    description:
-      "Perform a natural language memory operation: store, update, delete, or reorganize memories. The Memory Brain agent autonomously decides which tools to use. Examples: 'remember that Steven switched to Godot', 'delete all memories about dark mode'.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        request: { type: "string", description: "Natural language instruction for memory operation" },
+        request: { type: "string", description: "Natural language request for the memory agent" },
       },
       required: ["request"],
     },
@@ -231,18 +219,10 @@ async function handleRelated({ entity }) {
   return text;
 }
 
-async function handleMemoryAsk({ request }) {
-  const result = await api("/api/v1/brain/ask", {
+async function handleMemoryAgent({ request }) {
+  const result = await api("/api/v1/brain", {
     method: "POST",
     body: { request, user_id: USER_ID },
-  });
-  return result?.answer || JSON.stringify(result);
-}
-
-async function handleMemoryDo({ request }) {
-  const result = await api("/api/v1/brain/do", {
-    method: "POST",
-    body: { request, user_id: USER_ID, confirmed: true },
   });
   return result?.answer || JSON.stringify(result);
 }
@@ -252,8 +232,7 @@ const HANDLERS = {
   mem_store: handleStore,
   mem_forget: handleForget,
   mem_related: handleRelated,
-  memory_ask: handleMemoryAsk,
-  memory_do: handleMemoryDo,
+  memory_agent: handleMemoryAgent,
 };
 
 // ---------------------------------------------------------------------------

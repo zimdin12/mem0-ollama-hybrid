@@ -1,7 +1,7 @@
 """
 Phase 3 tests: Brain REST API endpoints.
 
-Tests the /api/v1/brain/* endpoints via HTTP.
+Tests the /api/v1/brain endpoint via HTTP.
 Run from the host machine (not inside the container).
 
 Usage:
@@ -53,15 +53,14 @@ def run_tests():
         print("Start the container first: docker compose up -d openmemory-mcp")
         sys.exit(1)
 
-    # Insert test data — use the brain's own store endpoint so user gets auto-created
+    # Insert test data via the brain agent itself
     print("=== Setup: Inserting test data ===")
     try:
-        resp = requests.post(f"{API_URL}/api/v1/brain/do", json={
+        resp = requests.post(f"{API_URL}/api/v1/brain", json={
             "request": "Remember these facts: Steven's favorite IDE is VSCode. He uses it for TypeScript and Python.",
             "user_id": TEST_USER,
-            "confirmed": True,
         }, timeout=120)
-        print(f"  Insert via brain/do: {resp.status_code}")
+        print(f"  Insert via brain: {resp.status_code}")
         if resp.status_code == 200:
             data = resp.json()
             print(f"  Brain stored: {data.get('answer', '')[:200]}")
@@ -84,11 +83,11 @@ def run_tests():
 
     test("status returns model info", test_status)
 
-    # --- /brain/ask ---
-    print("\nEndpoint: POST /brain/ask")
+    # --- POST /brain (search) ---
+    print("\nEndpoint: POST /brain (search query)")
 
-    def test_ask_basic():
-        resp = requests.post(f"{API_URL}/api/v1/brain/ask", json={
+    def test_search():
+        resp = requests.post(f"{API_URL}/api/v1/brain", json={
             "request": "What IDE does Steven use?",
             "user_id": TEST_USER,
         }, timeout=120)
@@ -100,16 +99,15 @@ def run_tests():
         print(f"    Answer: {data['answer'][:200]}")
         print(f"    Steps: {data['steps']}, Tools: {data['tools_called']}, Time: {data.get('elapsed_seconds', '?')}s")
 
-    test("ask returns answer with 200", test_ask_basic)
+    test("search returns answer with 200", test_search)
 
-    # --- /brain/do (non-destructive) ---
-    print("\nEndpoint: POST /brain/do (store)")
+    # --- POST /brain (store) ---
+    print("\nEndpoint: POST /brain (store)")
 
-    def test_do_store():
-        resp = requests.post(f"{API_URL}/api/v1/brain/do", json={
+    def test_store():
+        resp = requests.post(f"{API_URL}/api/v1/brain", json={
             "request": "Remember that Steven recently upgraded to 96GB of RAM",
             "user_id": TEST_USER,
-            "confirmed": True,
         }, timeout=120)
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text[:200]}"
         data = resp.json()
@@ -117,28 +115,23 @@ def run_tests():
         print(f"    Answer: {data['answer'][:200]}")
         print(f"    Steps: {data['steps']}, Tools: {data['tools_called']}")
 
-    test("do (store) executes and returns answer", test_do_store)
+    test("store executes and returns answer", test_store)
 
-    # --- /brain/do (destructive, unconfirmed) ---
-    print("\nEndpoint: POST /brain/do (delete, unconfirmed)")
+    # --- POST /brain (delete) ---
+    print("\nEndpoint: POST /brain (delete)")
 
-    def test_do_delete_unconfirmed():
-        resp = requests.post(f"{API_URL}/api/v1/brain/do", json={
+    def test_delete():
+        resp = requests.post(f"{API_URL}/api/v1/brain", json={
             "request": "Delete all memories about RAM",
             "user_id": TEST_USER,
-            "confirmed": False,
         }, timeout=120)
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text[:200]}"
         data = resp.json()
-        # May or may not require confirmation depending on whether brain used destructive tools
-        if data.get("requires_confirmation"):
-            assert data.get("planned_actions"), "Expected planned_actions when requires_confirmation"
-            print(f"    Requires confirmation: {len(data['planned_actions'])} planned actions")
-        else:
-            print(f"    No destructive actions (brain may have found nothing to delete)")
+        assert "answer" in data, f"Missing 'answer' in response"
+        print(f"    Answer: {data['answer'][:200]}")
         print(f"    Steps: {data['steps']}, Tools: {data['tools_called']}")
 
-    test("do (delete, unconfirmed) returns plan or executes read-only part", test_do_delete_unconfirmed)
+    test("delete executes and returns answer", test_delete)
 
     # --- /brain/audit ---
     print("\nEndpoint: GET /brain/audit")

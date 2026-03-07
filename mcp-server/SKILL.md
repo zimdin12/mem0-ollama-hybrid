@@ -9,6 +9,14 @@ You have access to a persistent hybrid memory system via MCP tools. It combines 
 
 ## Available MCP Tools
 
+### v2 — Memory Agent (recommended)
+
+| Tool | When to use |
+|------|------------|
+| `memory_agent` | Talk to the memory agent in natural language. It autonomously searches, stores, deletes, or updates memories. Examples: "What does Steven use for coding?", "Steven switched from UE5 to Godot", "Delete all memories about dark mode". The agent determines intent and chains operations as needed. |
+
+### v1 — Direct Tools (faster, simpler)
+
 | Tool | When to use |
 |------|------------|
 | `search_memory` | Recall facts, preferences, decisions, people, projects — any previously stored context. Use `offset` to paginate. |
@@ -18,6 +26,11 @@ You have access to a persistent hybrid memory system via MCP tools. It combines 
 | `delete_all_memories` | Wipe all memories for the user (use with extreme caution) |
 | `get_related_memories` | Explore connections between entities via graph traversal |
 | `list_memories` | List all stored memories with optional filtering |
+
+## When to use v2 vs v1
+
+- **`memory_agent`** (v2): Best for complex operations — "update Steven's GPU to RTX 5090", "what's the relationship between Steven and Docker?", "delete everything about dark mode". The agent chains multiple tool calls autonomously.
+- **v1 tools**: Best for simple, fast operations — quick search, store a single fact, delete by ID. Lower latency since they don't invoke an LLM reasoning loop.
 
 ## Usage Modes
 
