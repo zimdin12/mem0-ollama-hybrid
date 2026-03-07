@@ -90,8 +90,9 @@ Brain would:
 
 ### Model Requirements
 - The brain LLM needs reliable **tool calling** (not just text generation)
-- qwen3:4b-instruct can do JSON mode but struggles with multi-step tool calling
-- May need a larger model (7-8B) or a model specifically fine-tuned for tool use
+- qwen3.5:4b handles extraction well but may struggle with multi-step agent reasoning
+- Plan: use **qwen3.5:9b** on Ollama for the brain agent — better reasoning at moderate
+  VRAM cost (~6GB), benchmarked as solid all-rounder with perfect dedup
 - Alternatively: structured agent loop (not native tool_calls) where the code parses
   JSON actions from the LLM and executes them
 

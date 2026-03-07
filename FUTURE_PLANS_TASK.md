@@ -38,26 +38,22 @@ before writing a single line of code.
 **100% local. No OpenAI, no Anthropic, no cloud API calls anywhere in the codebase.**
 
 The embedding model is `qwen3-embedding:0.6b` at **1024 dimensions** (on Ollama). Do not change this.
-The extraction LLM is `qwen3:4b-instruct-2507-q4_K_M` (on Ollama) — keep using this for fact/graph extraction.
+The extraction LLM is `qwen3.5:4b` (on Ollama) — keep using this for fact/graph extraction.
 
 ### Brain Agent Model Selection
 
-LM Studio has multiple models loaded. **Test which one works best for multi-step tool calling.**
+**Primary choice: `qwen3.5:9b` on Ollama** — better reasoning than 4b, benchmarked as solid
+all-rounder with perfect dedup and config-insensitive extraction. Uses ~6GB VRAM alongside
+the extraction model (qwen3.5:4b) and embedding model (qwen3-embedding:0.6b). Total VRAM
+for all 3 models: ~12GB, fits comfortably on RTX 4090 (24GB).
+
+LM Studio has multiple models loaded as fallback. **Use only if qwen3.5:9b isn't sufficient.**
 List them: `GET http://localhost:11434/v1/models`
 
-Models available as of Mar 2026:
-- `qwen/qwen3.5-35b-a3b` — 35B MoE (3B active params), likely best reasoning for agent loops
-- `qwen/qwen3-coder-next` — code-focused, good at structured JSON output
-- `meta-llama-3.1-8b-instruct` — reliable tool caller, well-tested
-- `zai-org/glm-4.7-flash` — fast
-- `mistralai/devstral-small-2-2512` — code-focused
-- `huihui-ai_huihui-gpt-oss-20b-abliterated` — uncensored 20B
-
 **Strategy**:
-1. Try `qwen3.5:4b` on Ollama first — same backend as extraction, simplest setup, and qwen3.5 is a significant reasoning upgrade over qwen3 at the same size
-2. If 4B isn't reliable enough for multi-step agent loops, try `qwen/qwen3.5-35b-a3b` on LM Studio (35B MoE, only 3B active — best reasoning)
-3. Fall back to `meta-llama-3.1-8b-instruct` on LM Studio if qwen models struggle with tool calling
-4. Document the model you chose and why in DECISIONS.md
+1. Use `qwen3.5:9b` on Ollama — same backend as extraction, simplest setup, proven quality
+2. If 9B isn't reliable enough for multi-step agent loops, try larger models on LM Studio
+3. Document the model you chose and why in DECISIONS.md
 
 **IMPORTANT**: LM Studio uses OpenAI-compatible API, NOT Ollama-style API:
 - Endpoint: `http://host.docker.internal:11434/v1/chat/completions`
@@ -65,10 +61,7 @@ Models available as of Mar 2026:
 - For JSON mode: set `response_format={"type": "json_object"}` in the chat completion call
 - Do NOT use Ollama's `format: 'json'` or `/api/chat` — those don't work with LM Studio
 
-**Ollama also has `qwen3.5:4b`** (or will soon) — this is the simplest option since it uses
-the same Ollama API as the extraction pipeline. qwen3.5 has better reasoning than qwen3 at
-the same parameter count, so it may handle multi-step agent loops that qwen3:4b couldn't.
-If using Ollama for the brain: `http://ollama:11434` (inside container), same `/api/chat` endpoint.
+Ollama for the brain: `http://ollama:11434` (inside container), same `/api/chat` endpoint.
 
 ---
 
@@ -179,7 +172,7 @@ class MemoryBrainAgent:
     """
     
     MAX_STEPS = 12           # hard stop to prevent infinite loops
-    MODEL = "qwen3.5:4b"                         # from env: BRAIN_LLM_MODEL (on Ollama)
+    MODEL = "qwen3.5:9b"                         # from env: BRAIN_LLM_MODEL (on Ollama)
     OLLAMA_URL = "http://ollama:11434"            # from env: BRAIN_OLLAMA_URL (same as extraction)
     
     async def run(self, request: str, user_id: str, context: list = None) -> BrainResult
@@ -361,7 +354,7 @@ as pass-through HTTP calls to the FastAPI `/brain/ask` and `/brain/do` endpoints
 Add to `openmemory/api/.env.example`:
 ```env
 # === Memory Brain Agent ===
-BRAIN_LLM_MODEL=qwen3.5:4b                         # Model for the brain agent loop (on Ollama alongside extraction model)
+BRAIN_LLM_MODEL=qwen3.5:9b                         # Model for the brain agent loop (on Ollama, better reasoning than 4b)
 BRAIN_OLLAMA_URL=http://ollama:11434                # Same Ollama instance (or http://host.docker.internal:11434 for LM Studio)
 BRAIN_MAX_STEPS=12              # Max tool calls per brain invocation
 BRAIN_CONFIRM_DESTRUCTIVE=true  # Require confirmed=true for deletes via /brain/do
@@ -474,7 +467,7 @@ DECISIONS.md   # Architectural decisions with rationale
 | Should `/brain/do` auto-confirm or gate destructive ops? | Gate with `confirmed` flag (safer default) |
 | Should brain tools go in a new router or extend memories.py? | New router `brain.py` (cleaner separation) |
 | Should Node.js MCP server be updated too? | Yes — both tools as HTTP pass-through to FastAPI |
-| What if qwen3:4b is too weak for the agent loop? | Default to LM Studio (host.docker.internal:11434) which has qwen3.5 or similar larger model. Fall back to qwen3:4b on Ollama only if LM Studio is down. |
+| What if qwen3.5:9b is too weak for the agent loop? | Try larger models on LM Studio (host.docker.internal:11434). Fall back to qwen3.5:4b on Ollama for lighter weight. |
 | Should brain maintain session state across calls? | No — stateless like v1. Each call is independent. |
 
 ---
@@ -508,7 +501,7 @@ DECISIONS.md   # Architectural decisions with rationale
 - The brain's `memory_ask("what hobbies does X have?")` does cross-DB synthesis that `search_memory` can't — this is genuinely new capability
 - Don't try to replace `conversation_memory` — its regex+LLM pipeline is tuned for conversation turns
 
-### Known 4B model limitations (expect these with qwen3:4b, may be fixed with qwen3.5):
+### Known model limitations (observed during benchmarking):
 
 - Confuses similar domains: ChefMate (cooking app) gets mixed with cooking (hobby)
 - Sometimes connects game features to person instead of project
