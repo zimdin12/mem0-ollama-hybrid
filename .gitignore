@@ -191,5 +191,8 @@ testing.ipynb
 benchmark_*_output.txt
 benchmark_all_models*.txt
 
-# Test data files
+# Test data and result files
 Echoes_test_data.txt
+big_test_results_*.txt
+master_test_results_*.txt
+master_test.py
