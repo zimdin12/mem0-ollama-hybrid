@@ -135,10 +135,10 @@ Three optimized prompts:
   before creating edges. Prevents self-loops when different entity names (e.g., "water" and
   "water element") resolve to the same physical node via embedding similarity.
 - **Graph cleanup on delete**: Added `delete_memory()` method. When a memory is deleted,
-  finds related graph entities via embedding similarity (threshold 0.85, limit 5), decrements
-  their `mentions` counter, and removes nodes/relationships that reach zero mentions (orphaned
-  entities). Hub nodes like `steven` survive because they have many mentions from other memories.
-  Tight threshold (0.85) prevents over-deletion of unrelated nodes. This fixes the bug where
+  extracts key terms from the memory text and finds related graph entities via substring
+  matching against node names. Decrements their `mentions` counter and removes
+  nodes/relationships that reach zero mentions (orphaned entities). Hub nodes (>5 mentions,
+  e.g. `steven`) are protected from deletion even if matched. This fixes the bug where
   deleted memories left stale graph entities that caused false positives in search.
 
 ## 7. MCP Server Enhancements (`openmemory/api/app/mcp_server.py`)
