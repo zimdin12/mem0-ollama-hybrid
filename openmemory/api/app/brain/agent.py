@@ -22,8 +22,11 @@ logger = logging.getLogger(__name__)
 
 
 def _strip_json_fences(text: str) -> str:
-    """Strip markdown code fences from JSON output."""
+    """Strip markdown code fences and think blocks from JSON output."""
+    import re
     text = text.strip()
+    # Strip <think>...</think> blocks (qwen3.5 thinking mode)
+    text = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL).strip()
     if text.startswith('```'):
         first_nl = text.find('\n')
         if first_nl != -1:
@@ -175,6 +178,8 @@ class MemoryBrainAgent:
             "messages": messages,
             "format": "json",
             "stream": False,
+            # think: true gives better quality (4 more facts stored in testing)
+            # <think> block stripping in _strip_json_fences handles the output
             "options": {
                 "temperature": 0.1,
                 "top_p": 0.8,

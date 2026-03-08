@@ -13,8 +13,10 @@ from typing import Dict, List, Optional, Tuple, Any
 
 
 def _strip_json_fences(text):
-    """Strip markdown code fences from JSON output (qwen3.5+ models add these)."""
+    """Strip markdown code fences and think blocks from JSON output (qwen3.5+ models)."""
     text = text.strip()
+    # Strip <think>...</think> blocks (safety net if think:false is ignored)
+    text = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL).strip()
     if text.startswith('```'):
         first_nl = text.find('\n')
         if first_nl != -1:

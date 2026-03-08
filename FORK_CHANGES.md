@@ -370,6 +370,44 @@ Three layers prevent duplicate storage:
 
 ---
 
+## 18. Memory Brain Agent (`openmemory/api/app/brain/`) — v2 only
+
+**v2 feature** (memory_agent branch): Autonomous agent that handles all memory operations
+via natural language. Uses Ollama JSON mode for structured reasoning.
+
+### Architecture
+- `agent.py` — `MemoryBrainAgent` class with multi-step reasoning loop (max 12 steps)
+- `tools.py` — 8 primitive tools: vector_search/store/delete, graph_query/mutate, sql_query/mutate, embed
+- `prompts.py` — System prompt with intent handling (SEARCH, STORE, DELETE, UPDATE)
+- `__init__.py` — Package marker
+
+### Key Design
+- **JSON mode** — Ollama `format: "json"` for reliable structured output (not native tool_calls)
+- **Think blocks preserved** — qwen3.5 thinking mode improves quality (tested: think:false drops 4/24 facts)
+- **Think block stripping** — `<think>` blocks stripped from output before JSON parsing as safety net
+- **Single endpoint** — `POST /api/v1/brain` (agent determines intent from natural language)
+- **Dedup in vector_store** — cosine >= 0.85 check before storage
+- **Async graph** — `vector_store` triggers graph extraction in background thread
+- **Audit trail** — All tool calls logged to `brain_audit` SQLite table
+
+### REST Endpoints
+- `POST /api/v1/brain` — Natural language memory operations
+- `GET /api/v1/brain/audit` — Audit log viewer
+- `GET /api/v1/brain/status` — Brain config (model, tools, max steps)
+
+### MCP Tool
+- `memory_agent(request)` — Single tool exposed via SSE and stdio transports
+
+### Performance (qwen3.5:4b, RTX 4090)
+- Search (simple): ~5-7s (2 steps)
+- Search (complex): ~14s (4 steps)
+- Store: ~19-21s (3 steps)
+- Dedup reject: ~7s (2 steps)
+- Delete: ~16s (3 steps)
+- Update: ~30s (4 steps)
+
+---
+
 ## Files Summary
 
 ### Added (not in upstream)
@@ -384,6 +422,10 @@ Three layers prevent duplicate storage:
 | `mcp-server/server.js` | ~200 | Standalone MCP server (stdio) |
 | `mcp-server/SKILL.md` | ~50 | Claude Code skill definition |
 | `openmemory/api/model_configs.py` | ~210 | Per-model-family sampling configs with auto-detection |
+| `openmemory/api/app/brain/agent.py` | ~250 | Brain agent loop (JSON mode, retry, audit) |
+| `openmemory/api/app/brain/tools.py` | ~280 | 8 primitive DB tools + audit logging |
+| `openmemory/api/app/brain/prompts.py` | ~106 | System prompt with intent handling |
+| `openmemory/api/app/routers/brain.py` | ~80 | REST endpoints for brain agent |
 | `test_memory_system.py` | ~300 | 5-phase test suite |
 | `test_comprehensive.py` | ~355 | 6-phase test suite (bulk, conversation, search, dedup, graph, qdrant) |
 | `benchmark_models.py` | ~400 | Cross-model raw extraction benchmark (9+ models) |
@@ -398,7 +440,7 @@ Three layers prevent duplicate storage:
 |------|-------------|
 | `openmemory/api/app/utils/memory.py` | Ollama fix (~300 lines), config cascade, Docker host detection |
 | `openmemory/api/app/utils/categorization.py` | OpenAI → Ollama with JSON fallback parsing |
-| `openmemory/api/app/mcp_server.py` | Enhanced memory manager, 7 tools, permission filter fix, smart delete |
+| `openmemory/api/app/mcp_server.py` | Enhanced memory manager, 8 tools (7 v1 + memory_agent), permission filter fix, smart delete |
 | `openmemory/api/app/routers/memories.py` | MEMORY_MODE, POST /search, POST /conversation, smart add/delete, 7 graph endpoints |
 | `openmemory/api/app/routers/config.py` | Env-based defaults, no auto-create DB rows |
 | `openmemory/api/app/database.py` | SQLite path for Docker volume persistence |
