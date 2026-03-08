@@ -10,8 +10,8 @@ Branch: `memory_agent`
 - [x] Phase 4: MCP tool (`memory_agent`)
 - [x] Phase 5: Tests (22 tests, 3 suites)
 - [x] Client configs updated (OpenClaw plugin, Claude Code skill, OpenWebUI prompt)
-- [ ] Production hardening (model quality tuning, edge case handling)
-- [ ] Performance benchmarking vs v1
+- [x] Production hardening (model quality tuning, edge case handling)
+- [x] Performance benchmarking vs v1
 
 ## Vision
 
@@ -80,12 +80,12 @@ search_memory, add_memories, conversation_memory,
 delete_memories, delete_all_memories, get_related_memories, list_memories
 ```
 
-## Open Questions
+## Answered Questions (from testing)
 
-- **Model quality**: Can qwen3.5:4b handle multi-step agent reasoning reliably? Or does it need 9b+?
-- **Latency**: Agent loop adds 5-20s of LLM reasoning. Acceptable for all use cases?
-- **When to use v2 vs v1**: Need clear guidance for callers — v2 for complex ops, v1 for speed?
-- **Extraction bypass**: Brain's vector_store uses `infer=False`. Should it run full extraction pipeline?
+- **Model quality**: Yes — qwen3:4b, qwen3.5:4b, and qwen3.5:9b all handle multi-step reasoning. 4b models are adequate; 9b is better for complex multi-search queries.
+- **Latency**: Agent loop adds 3-15s depending on complexity. Acceptable for interactive use. v1 tools remain available for latency-sensitive automation.
+- **When to use v2 vs v1**: v2 for natural language interaction (chat clients, complex queries). v1 for programmatic/fast operations (auto-recall hooks, bulk operations).
+- **Extraction bypass**: Brain's vector_store correctly uses the full extraction pipeline (smart_add_memory with dedup + async graph).
 
 ## Not in Scope
 

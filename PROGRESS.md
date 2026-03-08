@@ -17,25 +17,25 @@
 - `run_confirmed()` for executing previously planned actions
 - Module-level singleton `brain_agent`
 
-## Phase 3: REST API Endpoints ✅
-- Created `openmemory/api/app/routers/brain.py` with 4 endpoints
-- `POST /api/v1/brain/ask` — read-only brain query
-- `POST /api/v1/brain/do` — read-write with confirmation gate
+## Phase 3: REST API Endpoint ✅
+- Created `openmemory/api/app/routers/brain.py`
+- `POST /api/v1/brain` — single endpoint, agent determines intent from natural language
 - `GET /api/v1/brain/audit` — audit log viewer
 - `GET /api/v1/brain/status` — brain config status
 - Registered in `main.py` and `routers/__init__.py`
 
-## Phase 4: MCP Tools ✅
-- Added `memory_ask` and `memory_do` to `mcp_server.py` (SSE transport)
-- Added `memory_ask` and `memory_do` to `mcp-server/server.js` (stdio transport)
-- All 9 existing MCP tools preserved (7 original + 2 new)
+## Phase 4: MCP Tool ✅
+- Added `memory_agent` tool to `mcp_server.py` (SSE transport)
+- Added `memory_agent` tool to `mcp-server/server.js` (stdio transport)
+- All 7 v1 MCP tools preserved alongside `memory_agent`
 
 ## Phase 5: Documentation & Testing ✅
 - Created `openmemory/api/app/brain/README.md` — architecture, tools, config
-- Created `PROGRESS.md` (this file) and `DECISIONS.md`
-- Created test suite: `tests/test_brain_tools.py`, `tests/test_brain_agent.py`, `tests/test_brain_api.py`
+- Created test suites: `tests/test_brain_tools.py`, `tests/test_brain_agent.py`, `tests/test_brain_api.py`
+- Client configs: OpenClaw plugin, Claude Code skill, Open WebUI system prompt
 
-## Pending
-- Build container and run integration tests
-- Verify UI still works
-- Verify all v1 MCP tools still respond
+## Phase 6: Integration Testing ✅
+- Container builds and runs successfully
+- UI works with brain agent
+- All v1 MCP tools still respond
+- Tested with real data (personal facts, Echoes of the Fallen game doc)

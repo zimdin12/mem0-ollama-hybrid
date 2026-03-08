@@ -1,19 +1,19 @@
 # Memory Brain Agent — Architectural Decisions
 
-## D1: Brain Model — qwen3.5:9b on Ollama
+## D1: Brain Model — Same as Extraction (`LLM_MODEL`)
 
-**Decision**: Use `qwen3.5:9b` on the same Ollama instance as the extraction pipeline.
+**Decision**: Use the same model as the extraction pipeline (`LLM_MODEL` env var, default: qwen3:4b).
+No separate brain model — one model for everything.
 
 **Rationale**:
-- Benchmarked as solid all-rounder with perfect dedup and config-insensitive extraction
-- Better reasoning than 4b for multi-step agent loops
-- ~6GB VRAM — fits alongside extraction model (qwen3.5:4b, ~2.7GB) and embedding model
-  (qwen3-embedding:0.6b, ~0.5GB) on RTX 4090 (24GB)
-- Same Ollama API — no need for a separate LM Studio connection
+- Simplicity — one model to configure, tune, and monitor
+- All tested models (qwen3:4b, qwen3.5:4b, qwen3.5:9b) handle multi-step agent reasoning adequately
+- Smaller models are faster per step, which matters for agent loops (5-12 steps)
+- Larger models (9b+) can be used by changing `LLM_MODEL` if more complex reasoning is needed
 
 **Alternatives considered**:
-- qwen3.5:4b — lighter but may struggle with multi-step reasoning
-- LM Studio models (qwen3.5-35b-a3b, llama-3.1-8b) — requires cross-host HTTP, added complexity
+- Separate `BRAIN_LLM_MODEL` — rejected for simplicity
+- LM Studio models (qwen3.5-35b-a3b) — requires cross-host HTTP, added complexity
 
 ## D2: JSON Mode over Native Tool Calls
 
