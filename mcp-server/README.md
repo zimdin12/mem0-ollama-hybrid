@@ -6,10 +6,13 @@ MCP server that exposes the OpenMemory hybrid memory system (vector + graph via 
 
 | Tool | Description |
 |------|-------------|
-| `mem_search` | Semantic search across vector store + knowledge graph |
-| `mem_store` | Store a memory (auto-extracts entities for graph) |
-| `mem_forget` | Delete a memory by ID |
-| `mem_related` | Explore entity relationships via graph traversal |
+| `search_memory` | Hybrid search across vector + graph + temporal (paginated) |
+| `add_memories` | Smart add with dedup — only stores truly new information |
+| `list_memories` | List all memories with permission filtering |
+| `delete_memories` | Delete specific memories by ID |
+| `delete_all_memories` | Delete all memories for the user |
+| `conversation_memory` | Extract and store facts from a conversation turn |
+| `get_related_memories` | Explore entity relationships via graph traversal |
 
 ## Setup
 
