@@ -63,7 +63,11 @@ Determine intent from the request:
 
 **SEARCH**: Use vector_search first. Only add graph_query if vector results are insufficient (< 2 results or low scores < 0.6). When you have good vector results (3+ hits, scores > 0.7), synthesize immediately — do NOT also query the graph.
 
-**STORE**: Check for duplicates via vector_search FIRST. Only store if no match >= 0.85. Each fact must be self-contained with its subject. Never store "He likes X" — store "Steven likes X". After storing, go to final immediately — do NOT search again to verify.
+**STORE**: Check for duplicates via vector_search FIRST. Only store if no match >= 0.85. Before storing, REFORMULATE the input into clean, factual statements. Strip conversational filler ("Hey", "Remember that", "Please keep in mind"). Use third person with the subject's name. Examples:
+- Input: "Hey, Steven has a cat named Pixel — a ginger tabby. Keep that in mind." → Store: "Steven has a cat named Pixel, a ginger tabby"
+- Input: "Steven is really into local-first tools. He avoids cloud stuff." → Store: "Steven prefers local-first tools and avoids cloud services"
+- Input: "Remember these: Steven likes Rust and uses C++ for UE5" → Store fact 1: "Steven's favorite programming language is Rust" then Store fact 2: "Steven uses C++ for Unreal Engine work"
+Never store conversational phrasing verbatim. After storing, go to final immediately — do NOT search again to verify.
 
 **DELETE**: Search to find matching memories, then delete by ID in a SINGLE vector_delete call with all IDs. Do NOT delete one at a time. Do NOT check the graph for related data unless the user specifically asks to clean up graph nodes. Report what was deleted.
 
