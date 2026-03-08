@@ -2,14 +2,13 @@
 
 MCP server that exposes the OpenMemory hybrid memory system (vector + graph via mem0) to any MCP client. Includes a Claude Code skill for auto-recall/capture behavior.
 
-## Tools
+**Branch: `memory_agent` (v2)** — Single `memory_agent` tool powered by an autonomous brain agent.
+
+## Tool
 
 | Tool | Description |
 |------|-------------|
-| `mem_search` | Semantic search across vector store + knowledge graph |
-| `mem_store` | Store a memory (auto-extracts entities for graph) |
-| `mem_forget` | Delete a memory by ID |
-| `mem_related` | Explore entity relationships via graph traversal |
+| `memory_agent` | Natural language memory operations — search, store, delete, update, explore. The brain agent chains database tools autonomously. |
 
 ## Setup
 
@@ -20,9 +19,17 @@ npm install
 
 ## Add to Claude Code
 
-Two steps — MCP server (tools) and skill (behavior) are registered separately.
+Two steps — MCP server (tool) and skill (behavior) are registered separately.
 
-### 1. Register MCP server (provides the tools)
+### 1. Register MCP server (provides the tool)
+
+**SSE (recommended — no Node.js needed):**
+
+```bash
+claude mcp add openmemory --transport sse http://localhost:8765/mcp/claude-code/sse/steven
+```
+
+**Stdio (alternative):**
 
 ```bash
 claude mcp add openmemory -- node /path/to/mem0-fork/mcp-server/server.js
@@ -34,13 +41,8 @@ Or manually add to `~/.claude.json` or project `.mcp.json`:
 {
   "mcpServers": {
     "openmemory": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["/path/to/mem0-fork/mcp-server/server.js"],
-      "env": {
-        "MEMORY_API_URL": "http://localhost:8765",
-        "MEMORY_USER_ID": "steven"
-      }
+      "type": "sse",
+      "url": "http://localhost:8765/mcp/claude-code/sse/steven"
     }
   }
 }
@@ -62,18 +64,11 @@ cp SKILL.md ~/.claude/skills/openmemory/SKILL.md
 
 ## Add to OpenCode
 
-Add to your OpenCode MCP config:
-
 ```json
 {
   "openmemory": {
-    "type": "stdio",
-    "command": "node",
-    "args": ["/path/to/mem0-fork/mcp-server/server.js"],
-    "env": {
-      "MEMORY_API_URL": "http://localhost:8765",
-      "MEMORY_USER_ID": "steven"
-    }
+    "type": "sse",
+    "url": "http://localhost:8765/mcp/opencode/sse/steven"
   }
 }
 ```

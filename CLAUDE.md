@@ -2,9 +2,11 @@
 
 A mem0 fork that runs 100% locally using Ollama. Provides hybrid memory (vector + graph + temporal) for AI assistants.
 
+**Branch: `memory_agent` (v2)** — Single `memory_agent` MCP tool powered by an autonomous brain agent.
+
 ## How to Install for Claude Code
 
-### 1. MCP Server (gives Claude memory tools)
+### 1. MCP Server (gives Claude the memory agent tool)
 
 **Option A — SSE (recommended, no dependencies):**
 
@@ -19,7 +21,7 @@ cd mcp-server && npm install
 claude mcp add openmemory -- node mcp-server/server.js
 ```
 
-### 2. Skill (tells Claude when to use memory tools)
+### 2. Skill (tells Claude when to use the memory agent)
 
 Copy the skill file into Claude Code's skill discovery directory:
 
@@ -39,23 +41,24 @@ Claude Code auto-discovers skills from `.claude/skills/` — no CLI command need
 
 The OpenMemory API must be running on port 8765. If it's not running yet, see the Deployment section in README.md.
 
-## MCP Tools Available After Setup
+## MCP Tool
 
 | Tool | Description |
 |------|-------------|
-| `search_memory` | Hybrid search across vector + graph + temporal (returns 10 results) |
-| `add_memories` | Smart add with dedup — only stores truly new information |
-| `list_memories` | List all memories with permission filtering |
-| `delete_memories` | Delete specific memories by ID |
-| `delete_all_memories` | Delete all memories for the user |
-| `conversation_memory` | Process user message + LLM response, extract and store memorable facts |
-| `get_related_memories` | Explore entity relationships via graph traversal |
+| `memory_agent` | Natural language memory operations — search, store, delete, update, explore relationships. The brain agent autonomously chains database tools across vector, graph, and SQL stores. |
+
+**Examples:**
+- `"What GPU does Steven use?"` — searches vector + graph, synthesizes answer
+- `"Steven has a girlfriend called Mirjam"` — dedup check, store, graph extraction
+- `"Steven switched from UE5 to Godot"` — finds old fact, deletes it, stores correction
+- `"Delete all memories about dark mode"` — searches, batch deletes
+- `"How is Steven connected to Echoes of the Fallen?"` — graph traversal
 
 ## Project Structure
 
 - `openmemory/` — Docker services: FastAPI backend (port 8765) + Next.js UI (port 3000/3100)
+- `openmemory/api/app/brain/` — Brain agent (prompts, tools, agent loop)
 - `mcp-server/` — Host-side MCP server (Node.js stdio) + Claude Code skill
 - `mem0/` — Core mem0 Python library (modified from upstream)
-- `test_memory_system.py` — 5-phase test suite
 - See README.md for full deployment and environment variable docs
 - See FORK_CHANGES.md for detailed technical changelog vs upstream

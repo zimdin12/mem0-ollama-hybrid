@@ -205,7 +205,7 @@ mem0-fork/
 │   ├── docker-compose.override.yml # Neo4j, networking, health checks
 │   └── init-qdrant.sh             # Collection init (1024d cosine)
 ├── mcp-server/                    # Host-side MCP server (NOT containerized)
-│   ├── server.js                  # Node.js stdio transport, 4 tools
+│   ├── server.js                  # Node.js stdio transport (legacy, v1 tools)
 │   ├── SKILL.md                   # Claude Code skill (auto-recall/capture)
 │   ├── package.json
 │   └── .env.example
@@ -217,12 +217,16 @@ mem0-fork/
 
 ## Connecting Clients
 
-There are two ways to connect MCP clients to OpenMemory:
+### MCP Tool: `memory_agent`
 
-| Method | Transport | Requires | Best for |
-|--------|-----------|----------|----------|
-| **SSE** (recommended) | HTTP to API container | Nothing extra | Any MCP client — no Node.js needed |
-| **Stdio** | Node.js process on host | `npm install` in `mcp-server/` | Claude Code / OpenCode if SSE isn't supported |
+This branch exposes a single MCP tool — `memory_agent` — that accepts natural language requests. An autonomous LLM agent inside the API handles all memory operations (search, store, delete, update, graph exploration) by chaining primitive database tools.
+
+**Examples:**
+- Search: `"What GPU does Steven use?"`
+- Store: `"Steven has a girlfriend called Mirjam"`
+- Update: `"Steven switched from UE5 to Godot"`
+- Delete: `"Delete all memories about dark mode"`
+- Explore: `"How is Steven connected to Echoes of the Fallen?"`
 
 ### SSE Endpoint (recommended)
 
@@ -231,8 +235,6 @@ The OpenMemory API has a **built-in MCP server** at:
 ```
 http://<host>:8765/mcp/<client_name>/sse/<user_id>
 ```
-
-Replace `<host>` with your machine's IP or `localhost`, `<client_name>` with any label, and `<user_id>` with your user ID.
 
 **Claude Code:**
 
@@ -253,72 +255,13 @@ Or add to `~/.claude.json` (global) or `.mcp.json` (per-project):
 }
 ```
 
-**OpenCode:**
+**OpenCode / any MCP client:**
 
 ```json
 {
   "openmemory": {
     "type": "sse",
     "url": "http://localhost:8765/mcp/opencode/sse/steven"
-  }
-}
-```
-
-**Any MCP client (generic SSE config):**
-
-```json
-{
-  "type": "sse",
-  "url": "http://192.168.x.x:8765/mcp/my-client/sse/steven"
-}
-```
-
-### Stdio (Node.js MCP server)
-
-Alternative if your client doesn't support SSE. Runs `mcp-server/server.js` on the host machine as a subprocess.
-
-```bash
-cd mcp-server && npm install
-```
-
-**Claude Code:**
-
-```bash
-claude mcp add openmemory -- node /path/to/mcp-server/server.js
-```
-
-Or in config:
-
-```json
-{
-  "mcpServers": {
-    "openmemory": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["/path/to/mcp-server/server.js"],
-      "env": {
-        "MEMORY_API_URL": "http://localhost:8765",
-        "MEMORY_USER_ID": "steven"
-      }
-    }
-  }
-}
-```
-
-See `mcp-server/.env.example` for all env vars.
-
-**OpenCode:**
-
-```json
-{
-  "openmemory": {
-    "type": "stdio",
-    "command": "node",
-    "args": ["/path/to/mcp-server/server.js"],
-    "env": {
-      "MEMORY_API_URL": "http://localhost:8765",
-      "MEMORY_USER_ID": "steven"
-    }
   }
 }
 ```
@@ -363,33 +306,24 @@ Uses the bundled plugin at `config/extensions/openmemory/`. Config in `openclaw.
 
 ### REST API
 
+The brain agent endpoint handles all operations via natural language:
+
 ```bash
-# Hybrid search (advanced mode: vector + graph + temporal)
-curl -X POST http://localhost:8765/api/v1/memories/search \
+# Brain agent — natural language (search, store, delete, update, explore)
+curl -X POST http://localhost:8765/api/v1/brain \
   -H "Content-Type: application/json" \
-  -d '{"query": "what GPU does steven use", "user_id": "steven", "limit": 10}'
+  -d '{"request": "What GPU does Steven use?", "user_id": "steven"}'
 
-# Store a memory (advanced mode: smart add with dedup)
-# Returns: added facts, skipped duplicates, related existing memories
-curl -X POST http://localhost:8765/api/v1/memories/ \
+# Store via brain agent
+curl -X POST http://localhost:8765/api/v1/brain \
   -H "Content-Type: application/json" \
-  -d '{"text": "Steven uses an RTX 4090", "user_id": "steven"}'
+  -d '{"request": "Remember that Steven uses an RTX 4090", "user_id": "steven"}'
 
-# Conversation memory (extract + review + dedup + store from a conversation turn)
-curl -X POST http://localhost:8765/api/v1/memories/conversation \
-  -H "Content-Type: application/json" \
-  -d '{"user_message": "I switched to Neovim last week", "llm_response": "Nice, Neovim is great", "user_id": "steven"}'
-
-# Delete (advanced mode: returns deleted content + related memories)
-curl -X DELETE http://localhost:8765/api/v1/memories/ \
-  -H "Content-Type: application/json" \
-  -d '{"memory_ids": ["<uuid>"], "user_id": "steven"}'
-
-# List memories (UI pagination, not hybrid - always available)
-curl "http://localhost:8765/api/v1/memories/?user_id=steven&size=10"
-
-# Graph context
-curl "http://localhost:8765/api/v1/memories/graph/context/Steven?user_id=steven"
+# The v1 REST endpoints still work for direct access:
+# POST /api/v1/memories/search  — hybrid search
+# POST /api/v1/memories/        — store
+# DELETE /api/v1/memories/      — delete by IDs
+# GET /api/v1/memories/         — list
 ```
 
 ## How This Fork Differs from Upstream
@@ -416,7 +350,7 @@ Upstream mem0 defaults to OpenAI for everything. This fork replaces all cloud de
 | Session context | None | Optional conversation context passed to fact review and graph extraction LLM |
 | Self-referential edges | Possible | Prevented: fuzzy name matching + Neo4j element-ID comparison |
 | REST API | Basic endpoints | `MEMORY_MODE` switch: `advanced` uses hybrid search/smart add/delete |
-| MCP tools | Basic (4 tools) | Enhanced (7 tools: hybrid search, smart add, graph traversal, smart delete) |
+| MCP tools | Basic (4 tools) | Single `memory_agent` tool — autonomous LLM agent handles all operations via natural language |
 | MCP permissions | Filters out graph results | Correctly passes graph/temporal results through |
 | `Memory.add()` | No control over graph | Added `graph=False` parameter for per-fact control |
 
@@ -429,8 +363,9 @@ Upstream mem0 defaults to OpenAI for everything. This fork replaces all cloud de
 | `openmemory/api/custom_update_prompt.py` | Context-preserving prompts optimized for small models |
 | `openmemory/docker-compose.override.yml` | Neo4j + Qdrant init + networking |
 | `openmemory/init-qdrant.sh` | Pre-create Qdrant collection (1024d cosine) |
-| `mcp-server/server.js` | Standalone MCP server (4 tools, stdio transport) |
-| `mcp-server/SKILL.md` | Claude Code skill for auto-recall/capture behavior |
+| `openmemory/api/app/brain/` | Memory Brain Agent — autonomous LLM agent (prompts, tools, agent loop) |
+| `mcp-server/server.js` | Legacy MCP server (stdio transport, v1 tools) |
+| `mcp-server/SKILL.md` | Claude Code skill for memory agent |
 | `test_memory_system.py` | 5-phase test suite (insert, validate, graph, search, dedup) |
 | `test_comprehensive.py` | 6-phase test suite (bulk insert, conversation, search quality, dedup, graph audit, qdrant) |
 | `TESTING_GUIDE.md` | Comprehensive testing checklist for extraction pipeline changes |
@@ -441,7 +376,7 @@ Upstream mem0 defaults to OpenAI for everything. This fork replaces all cloud de
 |------|--------|
 | `openmemory/api/app/utils/memory.py` | Ollama compatibility, env-based config, Docker host detection |
 | `openmemory/api/app/utils/categorization.py` | OpenAI → Ollama with JSON fallback parsing |
-| `openmemory/api/app/mcp_server.py` | Enhanced memory manager, 7 tools, permission filter fix |
+| `openmemory/api/app/mcp_server.py` | Single `memory_agent` MCP tool, brain agent endpoint, permission filter fix |
 | `openmemory/api/app/routers/memories.py` | MEMORY_MODE, POST /search, POST /conversation, smart add/delete, 7 graph endpoints |
 | `openmemory/api/app/routers/config.py` | Env-based defaults, no auto-create DB rows |
 | `openmemory/api/app/database.py` | SQLite path fix for Docker volume persistence |
