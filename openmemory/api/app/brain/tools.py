@@ -14,7 +14,9 @@ These tools reuse existing connection logic from enhanced_memory.py and memory.p
 import json
 import logging
 import os
+import queue
 import re
+import threading
 import uuid
 from datetime import datetime, UTC
 from typing import Any, Dict, List, Optional
@@ -25,6 +27,45 @@ from app.utils.memory import get_memory_client
 from sqlalchemy import text as sql_text
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Graph extraction queue — serializes Neo4j writes to avoid race conditions
+# when multiple vector_store calls fire graph extractions concurrently.
+# ---------------------------------------------------------------------------
+_graph_queue: queue.Queue = queue.Queue()
+_graph_worker_started = False
+_graph_worker_lock = threading.Lock()
+
+
+def _graph_worker():
+    """Process graph extractions one at a time from the queue."""
+    while True:
+        try:
+            item = _graph_queue.get(timeout=60)
+            if item is None:
+                break
+            fn, args, kwargs = item
+            try:
+                fn(*args, **kwargs)
+            except Exception as e:
+                logger.warning(f"Graph extraction failed in worker: {e}")
+            finally:
+                _graph_queue.task_done()
+        except queue.Empty:
+            continue
+
+
+def _ensure_graph_worker():
+    """Start the graph worker thread if not already running."""
+    global _graph_worker_started
+    if _graph_worker_started:
+        return
+    with _graph_worker_lock:
+        if _graph_worker_started:
+            return
+        t = threading.Thread(target=_graph_worker, daemon=True, name="graph-worker")
+        t.start()
+        _graph_worker_started = True
 
 # ---------------------------------------------------------------------------
 # Audit table (created on import if it doesn't exist)
@@ -153,7 +194,6 @@ def vector_store(text: str, user_id: str, memory_id: str = None) -> str:
     Embed text, store in Qdrant via mem0, trigger async graph extraction.
     Returns the stored memory ID.
     """
-    import threading
     from app.utils.enhanced_memory import EnhancedMemoryManager
 
     client = get_memory_client()
@@ -220,17 +260,16 @@ def vector_store(text: str, user_id: str, memory_id: str = None) -> str:
     except Exception as e:
         logger.warning(f"SQLite entry creation failed (non-fatal): {e}")
 
-    # Trigger async graph extraction
+    # Queue async graph extraction (serialized to avoid Neo4j race conditions)
     try:
-        thread = threading.Thread(
-            target=EnhancedMemoryManager._background_graph_extract,
-            args=(client, text, user_id),
-            kwargs={"context": None},
-            daemon=True,
-        )
-        thread.start()
+        _ensure_graph_worker()
+        _graph_queue.put((
+            EnhancedMemoryManager._background_graph_extract,
+            (client, text, user_id),
+            {"context": None},
+        ))
     except Exception as e:
-        logger.warning(f"Background graph extraction failed to start: {e}")
+        logger.warning(f"Graph extraction queue failed: {e}")
 
     _log_audit("vector_store", user_id, {"text": text[:200]}, {"stored_id": stored_id})
     return stored_id

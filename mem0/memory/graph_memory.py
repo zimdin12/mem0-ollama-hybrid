@@ -130,6 +130,86 @@ class MemoryGraph:
 
         return search_results
 
+    def delete_memory(self, memory_text, filters):
+        """Clean up graph entities that were created from a deleted memory.
+
+        Finds graph nodes whose names appear in the memory text (case-insensitive
+        substring match), decrements their mentions counter, and removes
+        nodes/relationships that reach zero mentions.
+        Skips the user_id hub node to avoid accidentally deleting the main person node.
+        """
+        if not memory_text or not memory_text.strip():
+            return
+
+        user_id = filters.get("user_id")
+        if not user_id:
+            return
+
+        try:
+            user_id_key = user_id.lower().replace(" ", "_")
+            text_lower = memory_text.lower()
+
+            # Find all graph nodes for this user, then check which names appear in the text
+            cypher = f"""
+            MATCH (n {self.node_label} {{user_id: $user_id}})
+            RETURN n.name AS name, elementId(n) AS node_id, coalesce(n.mentions, 1) AS mentions
+            """
+            all_nodes = self.graph.query(cypher, {"user_id": user_id})
+
+            if not all_nodes:
+                return
+
+            matched_nodes = []
+            for node in all_nodes:
+                node_name = node["name"]
+                # Skip user's hub node and high-mentions hub nodes (person entities)
+                if node_name == user_id_key:
+                    continue
+                if node["mentions"] > 5:
+                    continue
+                # Check if the node name (with underscores as spaces) appears in the text
+                name_with_spaces = node_name.replace("_", " ")
+                if name_with_spaces in text_lower or node_name in text_lower:
+                    matched_nodes.append(node)
+
+            if not matched_nodes:
+                return
+
+            deleted_nodes = []
+            decremented_nodes = []
+            for node in matched_nodes:
+                node_id = node["node_id"]
+                node_name = node["name"]
+                current_mentions = node["mentions"]
+
+                if current_mentions <= 1:
+                    self.graph.query(
+                        "MATCH (n) WHERE elementId(n) = $node_id DETACH DELETE n",
+                        {"node_id": node_id},
+                    )
+                    deleted_nodes.append(node_name)
+                else:
+                    self.graph.query("""
+                        MATCH (n) WHERE elementId(n) = $node_id
+                        SET n.mentions = n.mentions - 1
+                        WITH n
+                        OPTIONAL MATCH (n)-[r]-()
+                        WHERE coalesce(r.mentions, 1) > 0
+                        SET r.mentions = CASE WHEN coalesce(r.mentions, 1) <= 1 THEN 0 ELSE r.mentions - 1 END
+                        WITH r
+                        WHERE r IS NOT NULL AND r.mentions <= 0
+                        DELETE r
+                    """, {"node_id": node_id})
+                    decremented_nodes.append(node_name)
+
+            if deleted_nodes:
+                logger.info(f"Graph cleanup: deleted {len(deleted_nodes)} orphaned nodes: {deleted_nodes}")
+            if decremented_nodes:
+                logger.info(f"Graph cleanup: decremented mentions for {len(decremented_nodes)} nodes: {decremented_nodes}")
+
+        except Exception as e:
+            logger.warning(f"Graph cleanup failed (non-fatal): {e}")
+
     def delete_all(self, filters):
         # Build node properties for filtering
         node_props = ["user_id: $user_id"]

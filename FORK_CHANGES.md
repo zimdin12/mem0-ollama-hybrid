@@ -25,7 +25,8 @@ reliably produce tool_calls — returns empty arrays, wrong arguments, or malfor
   instead of mapping to a fixed whitelist. Only `concept` and `metric` are blocked.
 - Common type suggestions in prompt (person, project, technology, tool, hardware, hobby, etc.)
   but LLM is free to invent new types as needed
-- Hub-only relationship sources: only `person` and `project` can be relationship sources
+- Hub-preferring relationship sources: `person`, `project`, and `game_element` preferred as sources.
+  Non-hub sources get flipped when target is a hub (e.g. `neovim --used_by--> steven` → `steven --uses--> neovim`)
 - Number/amount entity filter (regex catches `60fps`, `5000_euros`, `2:3`, etc.)
 - Auto-adds user_id as person if used in relationships but omitted from entities
 - Accepts optional conversation context for better multi-topic understanding
@@ -133,6 +134,12 @@ Three optimized prompts:
 - **Self-referential edge guard**: In `_add_entities()`, compares resolved Neo4j element IDs
   before creating edges. Prevents self-loops when different entity names (e.g., "water" and
   "water element") resolve to the same physical node via embedding similarity.
+- **Graph cleanup on delete**: Added `delete_memory()` method. When a memory is deleted,
+  finds related graph entities via embedding similarity (threshold 0.85, limit 5), decrements
+  their `mentions` counter, and removes nodes/relationships that reach zero mentions (orphaned
+  entities). Hub nodes like `steven` survive because they have many mentions from other memories.
+  Tight threshold (0.85) prevents over-deletion of unrelated nodes. This fixes the bug where
+  deleted memories left stale graph entities that caused false positives in search.
 
 ## 7. MCP Server Enhancements (`openmemory/api/app/mcp_server.py`)
 

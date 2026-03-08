@@ -76,6 +76,25 @@ _BLOCKED_ENTITY_TYPES = frozenset([
 # Includes game_element because qwen3.5 often types game projects as game_element
 _HUB_TYPES = frozenset(['person', 'project', 'game_element'])
 
+# Map for flipping relationship direction when swapping source/target
+_RELATION_FLIP = {
+    'preferred_by': 'prefers', 'used_by': 'uses', 'owned_by': 'owns',
+    'developed_by': 'develops', 'created_by': 'creates', 'built_by': 'builds',
+    'played_by': 'plays', 'spoken_by': 'speaks', 'practiced_by': 'practices',
+    'has_user': 'uses', 'has_developer': 'develops', 'has_member': 'member_of',
+    'employs': 'works_at', 'teaches': 'mentored_by', 'mentors': 'mentored_by',
+    'contains': 'part_of', 'includes': 'part_of',
+}
+
+def _flip_relation(relation: str) -> str:
+    """Flip a relationship for hub-source normalization."""
+    if relation in _RELATION_FLIP:
+        return _RELATION_FLIP[relation]
+    if relation.endswith('_by'):
+        base = relation[:-3]
+        return base + 'es' if base.endswith(('s', 'sh', 'ch')) else base + 's'
+    return 'has'
+
 # --- Prompt ---
 
 GRAPH_EXTRACTION_PROMPT = """Extract entities and relationships from text. Return ONLY a JSON object.
@@ -342,11 +361,19 @@ def _json_extract_graph(self, data, filters, context=None):
                     logger.info(f"Skipping relationship with unknown target: {target}")
                     continue
 
-            # Only hub types (person, project) should be relationship sources
+            # Prefer hub types (person, project) as relationship sources
             source_type = entity_type_map.get(source, '')
+            target_type = entity_type_map.get(target, '')
             if source_type not in _HUB_TYPES:
-                logger.info(f"Skipping relationship with non-hub source: {source} ({source_type}) -> {target}")
-                continue
+                if target_type in _HUB_TYPES:
+                    # Flip: tool --preferred_by--> person => person --uses--> tool
+                    source, target = target, source
+                    source_type, target_type = target_type, source_type
+                    relation = _flip_relation(relation)
+                    logger.info(f"Flipped non-hub source: {target} -> {source} --{relation}--> {target}")
+                else:
+                    logger.info(f"Skipping relationship with non-hub source: {source} ({source_type}) -> {target}")
+                    continue
 
             # Fix misattributed built_with/features: person can't "build with" a tech
             if source_type == 'person' and relation in ('built_with', 'features'):

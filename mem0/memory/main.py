@@ -1226,6 +1226,14 @@ class Memory(MemoryBase):
             role=existing_memory.payload.get("role"),
             is_deleted=1,
         )
+        # Clean up orphaned graph entities created from this memory
+        if self.enable_graph and prev_value:
+            try:
+                user_id = existing_memory.payload.get("user_id", "user")
+                filters = {"user_id": user_id}
+                self.graph.delete_memory(prev_value, filters)
+            except Exception as e:
+                logger.warning(f"Graph cleanup during delete failed (non-fatal): {e}")
         return memory_id
 
     def reset(self):
@@ -2311,6 +2319,14 @@ class AsyncMemory(MemoryBase):
             role=existing_memory.payload.get("role"),
             is_deleted=1,
         )
+        # Clean up orphaned graph entities created from this memory
+        if self.enable_graph and prev_value:
+            try:
+                user_id = existing_memory.payload.get("user_id", "user")
+                filters = {"user_id": user_id}
+                await asyncio.to_thread(self.graph.delete_memory, prev_value, filters)
+            except Exception as e:
+                logger.warning(f"Graph cleanup during delete failed (non-fatal): {e}")
 
         return memory_id
 
