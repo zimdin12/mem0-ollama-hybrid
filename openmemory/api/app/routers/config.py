@@ -86,11 +86,16 @@ def get_default_configuration():
     if not config["mem0"]["embedder"]:
         provider = os.environ.get("EMBEDDER_PROVIDER", "openai")
         model = os.environ.get("EMBEDDER_MODEL", "text-embedding-3-small")
-        embedder_config = {"model": model}
+        embedding_dims = int(os.environ.get("QDRANT_EMBEDDING_DIMS", "1024"))
+        embedder_config = {"model": model, "embedding_dims": embedding_dims}
         if provider == "ollama":
             embedder_config["ollama_base_url"] = os.environ.get("EMBEDDER_OLLAMA_BASE_URL", os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"))
         else:
             embedder_config["api_key"] = f"env:{provider.upper()}_API_KEY"
+            # Support separate base URL for embedder (e.g. dedicated embedding server)
+            embedder_base_url = os.environ.get("EMBEDDER_OPENAI_BASE_URL", os.environ.get("OPENAI_BASE_URL"))
+            if embedder_base_url:
+                embedder_config["openai_base_url"] = embedder_base_url
         config["mem0"]["embedder"] = {"provider": provider, "config": embedder_config}
 
     return config

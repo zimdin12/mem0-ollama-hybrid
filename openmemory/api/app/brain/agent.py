@@ -58,8 +58,7 @@ class MemoryBrainAgent:
 
     def __init__(self):
         # Use the same model as extraction pipeline — one model for everything
-        self.model = os.environ.get("LLM_MODEL", "qwen3.5:4b")
-        self.ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434")
+        self.model = os.environ.get("LLM_MODEL", "qwen3.5-9b")
         self.max_steps = int(os.environ.get("BRAIN_MAX_STEPS", "12"))
 
     def run(self, request: str, user_id: str) -> BrainResult:
@@ -87,11 +86,11 @@ class MemoryBrainAgent:
         tools_called = []
 
         for step in range(1, self.max_steps + 1):
-            # Call Ollama
+            # Call LLM
             try:
-                response_text = self._call_ollama(messages)
+                response_text = self._call_llm(messages)
             except Exception as e:
-                logger.error(f"Brain step {step}: Ollama call failed: {e}")
+                logger.error(f"Brain step {step}: LLM call failed: {e}")
                 return BrainResult(
                     answer=f"Error: LLM call failed: {e}",
                     steps=step,
@@ -169,35 +168,21 @@ class MemoryBrainAgent:
             elapsed_seconds=time.time() - start,
         )
 
-    def _call_ollama(self, messages: List[Dict]) -> str:
-        """Call Ollama chat API with JSON mode."""
-        import requests
+    def _call_llm(self, messages: List[Dict]) -> str:
+        """Call LLM chat API with JSON mode (supports Ollama and OpenAI-compatible APIs)."""
+        from fix_graph_entity_parsing import llm_chat
 
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "format": "json",
-            "stream": False,
-            # think: true gives better quality (4 more facts stored in testing)
-            # <think> block stripping in _strip_json_fences handles the output
-            "options": {
+        return llm_chat(
+            messages=messages,
+            model=self.model,
+            json_mode=True,
+            options={
                 "temperature": 0.1,
                 "top_p": 0.8,
-                "top_k": 20,
                 "num_predict": 1024,
             },
-        }
-
-        resp = requests.post(
-            f"{self.ollama_url}/api/chat",
-            json=payload,
             timeout=120,
         )
-        resp.raise_for_status()
-
-        data = resp.json()
-        content = data.get("message", {}).get("content", "")
-        return content
 
     def _parse_response(self, response_text: str, messages: List[Dict], step: int) -> Optional[Dict]:
         """
@@ -227,7 +212,7 @@ class MemoryBrainAgent:
                         "error": f"Invalid JSON: {str(e)}. You MUST respond with a single valid JSON object matching the schema: {{\"thinking\": \"...\", \"action\": \"tool_name\", \"args\": {{}}, \"final\": false}} or {{\"thinking\": \"...\", \"final\": true, \"answer\": \"...\"}}"
                     })})
                     try:
-                        current_text = self._call_ollama(messages)
+                        current_text = self._call_llm(messages)
                     except Exception:
                         return None
                 else:

@@ -511,15 +511,12 @@ class EnhancedMemoryManager:
 
     def _llm_is_noise(self, text: str) -> bool:
         """Use LLM to check if short text is noise (greetings, filler, etc). Language-agnostic."""
-        import requests
-        ollama_url = os.environ.get('OLLAMA_BASE_URL', 'http://ollama:11434')
-        model = os.environ.get('LLM_MODEL', 'qwen3:4b-instruct-2507-q4_K_M')
-        from fix_graph_entity_parsing import _detect_model_family, _get_llm_options
+        from fix_graph_entity_parsing import llm_chat, _detect_model_family, _get_llm_options
+        model = os.environ.get('LLM_MODEL', 'qwen3.5-9b')
         options = _get_llm_options(_detect_model_family(model))
         try:
-            resp = requests.post(f'{ollama_url}/api/chat', json={
-                'model': model,
-                'messages': [
+            content = llm_chat(
+                messages=[
                     {'role': 'system', 'content': 'You classify text for a memory system. Respond with JSON only.'},
                     {'role': 'user', 'content': (
                         'Does this text state a FACT about someone or something? '
@@ -531,14 +528,13 @@ class EnhancedMemoryManager:
                         f'Text: "{text}"\n\nRespond: {{"keep": true/false}}'
                     )},
                 ],
-                'stream': False, 'format': 'json', 'think': False, 'options': options,
-            }, timeout=10)
-            if resp.status_code == 200:
-                result = json.loads(resp.json()['message']['content'])
-                is_noise = not result.get('keep', True)
-                if is_noise:
-                    logging.info(f"LLM noise filter: dropped '{text[:60]}'")
-                return is_noise
+                model=model, json_mode=True, options=options, timeout=10,
+            )
+            result = json.loads(content)
+            is_noise = not result.get('keep', True)
+            if is_noise:
+                logging.info(f"LLM noise filter: dropped '{text[:60]}'")
+            return is_noise
         except Exception as e:
             logging.warning(f"LLM noise check failed: {e}")
         return False  # Default: not noise (don't lose data)
@@ -556,7 +552,6 @@ class EnhancedMemoryManager:
 
         Falls back to original candidates if LLM call fails.
         """
-        import requests
         import os
 
         # Check if LLM review is enabled
@@ -564,11 +559,10 @@ class EnhancedMemoryManager:
             logging.info("LLM fact review disabled (LLM_FACT_REVIEW=false)")
             return candidate_facts
 
-        ollama_url = os.environ.get('OLLAMA_BASE_URL', 'http://ollama:11434')
-        model = os.environ.get('LLM_MODEL', 'qwen3:4b-instruct-2507-q4_K_M')
+        model = os.environ.get('LLM_MODEL', 'qwen3.5-9b')
 
         # Model-specific sampling options
-        from fix_graph_entity_parsing import _detect_model_family, _get_llm_options
+        from fix_graph_entity_parsing import llm_chat, _detect_model_family, _get_llm_options
         family = _detect_model_family(model)
         options = _get_llm_options(family)
 
@@ -625,25 +619,13 @@ Return empty list if nothing is worth remembering: {{"facts": []}}"""
                 "Return only JSON."
             )
 
-            resp = requests.post(f'{ollama_url}/api/chat', json={
-                'model': model,
-                'messages': [
+            content = llm_chat(
+                messages=[
                     {'role': 'system', 'content': system_prompt},
                     {'role': 'user', 'content': prompt},
                 ],
-                'stream': False,
-                'format': 'json',
-                'think': False,
-                'options': options,
-            }, timeout=30)
-
-            if resp.status_code != 200:
-                logging.warning(f"LLM fact review failed (HTTP {resp.status_code}), using regex facts")
-                return candidate_facts
-
-            raw = resp.json()
-            msg = raw.get('message', {})
-            content = msg.get('content', '') if isinstance(msg, dict) else str(msg)
+                model=model, json_mode=True, options=options, timeout=30,
+            )
 
             parsed = json.loads(_strip_json_fences(content))
             reviewed = parsed.get('facts', [])

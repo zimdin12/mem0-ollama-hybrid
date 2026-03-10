@@ -5,15 +5,13 @@
             "config": {
                 "model": "env:LLM_MODEL",
                 "temperature": 0,
-                "max_tokens": 2000,
-                "ollama_base_url": "env:OLLAMA_BASE_URL"
+                "max_tokens": 2000
             }
         },
         "embedder": {
             "provider": "env:EMBEDDER_PROVIDER",
             "config": {
-                "model": "env:EMBEDDER_MODEL",
-                "ollama_base_url": "env:EMBEDDER_OLLAMA_BASE_URL"
+                "model": "env:EMBEDDER_MODEL"
             }
         },
         "vector_store": {

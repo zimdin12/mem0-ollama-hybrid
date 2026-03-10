@@ -1,11 +1,9 @@
 """
 JSON-based graph extraction (replaces unreliable tool calling).
 
-Uses Ollama's `format: 'json'` mode with a single prompt that extracts
-both entities and relationships in one call. This is:
-- More reliable (JSON mode forces valid JSON output)
-- Faster (1 LLM call instead of 3-4)
-- Higher quality (LLM sees full context for both entities and relationships)
+Uses a single LLM call with JSON mode to extract both entities and
+relationships. Supports both Ollama and OpenAI-compatible APIs (llama.cpp, etc.)
+via LLM_API_URL env var.
 
 Supports model detection: adjusts prompts and sampling params per model family.
 """
@@ -14,7 +12,93 @@ import json
 import os
 import re
 import logging
+import requests as _requests
 from mem0.memory.graph_memory import MemoryGraph
+
+
+def llm_chat(messages, model=None, json_mode=True, options=None, timeout=120):
+    """Shared LLM chat call supporting both Ollama and OpenAI-compatible APIs.
+
+    Uses LLM_API_URL env var to determine the server. Falls back to
+    OLLAMA_BASE_URL for backwards compatibility.
+
+    Args:
+        messages: List of {role, content} dicts.
+        model: Model name (default from LLM_MODEL env var).
+        json_mode: Request JSON output format.
+        options: Dict of sampling options (temperature, top_p, etc.).
+        timeout: Request timeout in seconds.
+
+    Returns:
+        The content string from the LLM response.
+
+    Raises:
+        RuntimeError: If the API call fails.
+    """
+    if model is None:
+        model = os.environ.get('LLM_MODEL', 'qwen3.5-9b')
+
+    api_url = os.environ.get('LLM_API_URL', os.environ.get('OLLAMA_BASE_URL', ''))
+
+    if not api_url:
+        raise RuntimeError("LLM_API_URL or OLLAMA_BASE_URL must be set")
+
+    # Detect API type: if URL contains /v1 or env says openai, use OpenAI format
+    use_openai = os.environ.get('LLM_PROVIDER', 'openai') != 'ollama'
+
+    if use_openai:
+        # OpenAI-compatible API (llama.cpp, vLLM, SGLang, etc.)
+        url = api_url.rstrip('/') + '/v1/chat/completions'
+        payload = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            # Disable thinking mode for extraction tasks (saves tokens + latency)
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        if options:
+            # Map Ollama-style options to OpenAI params
+            if 'temperature' in options:
+                payload['temperature'] = options['temperature']
+            if 'top_p' in options:
+                payload['top_p'] = options['top_p']
+            if 'num_predict' in options:
+                payload['max_tokens'] = options['num_predict']
+
+        resp = _requests.post(url, json=payload, timeout=timeout)
+        if resp.status_code != 200:
+            raise RuntimeError(f"LLM API error: HTTP {resp.status_code}: {resp.text[:200]}")
+
+        data = resp.json()
+        return data['choices'][0]['message']['content']
+
+    else:
+        # Ollama native API (legacy fallback)
+        url = api_url.rstrip('/') + '/api/chat'
+        payload = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "think": False,
+        }
+        if json_mode:
+            payload["format"] = "json"
+        if options:
+            payload["options"] = options
+
+        resp = _requests.post(url, json=payload, timeout=timeout)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Ollama API error: HTTP {resp.status_code}: {resp.text[:200]}")
+
+        data = resp.json()
+        msg = data.get('message', {})
+        if isinstance(msg, str):
+            return msg
+        elif isinstance(msg, dict):
+            return msg.get('content', '')
+        return ''
 
 def _strip_json_fences(text):
     """Strip markdown code fences and think blocks from JSON output (qwen3.5+ models)."""
@@ -200,10 +284,7 @@ def _json_extract_graph(self, data, filters, context=None):
     prompt = GRAPH_EXTRACTION_PROMPT.replace("USER_ID", user_id)
 
     try:
-        import requests
-
-        ollama_url = os.environ.get('OLLAMA_BASE_URL', 'http://ollama:11434')
-        model = os.environ.get('LLM_MODEL', 'qwen3:4b-instruct-2507-q4_K_M')
+        model = os.environ.get('LLM_MODEL', 'qwen3.5-9b')
         family = _detect_model_family(model)
         options = _get_llm_options(family)
 
@@ -237,33 +318,16 @@ def _json_extract_graph(self, data, filters, context=None):
                 )
 
         logger.info(f"Graph extraction using {model} (family={family})")
-        resp = requests.post(f'{ollama_url}/api/chat', json={
-            'model': model,
-            'messages': [
+        content = llm_chat(
+            messages=[
                 {'role': 'system', 'content': prompt},
                 {'role': 'user', 'content': user_content},
             ],
-            'stream': False,
-            'format': 'json',
-            'think': False,
-            'options': options,
-        }, timeout=120)
-
-        if resp.status_code != 200:
-            logger.warning(f"Graph JSON extraction failed: HTTP {resp.status_code}")
-            return {}, []
-
-        raw_resp = resp.json()
-        if not isinstance(raw_resp, dict):
-            logger.warning(f"Graph JSON extraction: unexpected response type {type(raw_resp)}")
-            return {}, []
-        msg = raw_resp.get('message', {})
-        if isinstance(msg, str):
-            content = msg
-        elif isinstance(msg, dict):
-            content = msg.get('content', '')
-        else:
-            content = ''
+            model=model,
+            json_mode=True,
+            options=options,
+            timeout=120,
+        )
         if not content:
             logger.warning("Graph JSON extraction returned empty content")
             return {}, []
