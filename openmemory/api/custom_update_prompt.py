@@ -36,11 +36,13 @@ EXTRACTION RULES:
    BAD: "Uses C++ and Blueprints" (who/what uses them?)
    GOOD: "Echoes of the Fallen uses C++ and Blueprints"
 
-FIRST-PERSON RULE:
+NAME RULE:
 7. When text uses "I", "me", "my", replace with "Steven" (the user's name) in extracted facts
+8. When text says "the user", "The user", or just "User", replace with "Steven"
    BAD: "I use Neovim" or "User uses Neovim" or "The user prefers dark themes"
-   GOOD: "Steven uses Neovim" or "Steven prefers dark themes"
-8. When text says "the project" without naming it, keep "the project" — do NOT invent a name
+   BAD: "The user tried Go" or "the user's favorite editor"
+   GOOD: "Steven uses Neovim" or "Steven prefers dark themes" or "Steven tried Go"
+9. When text says "the project" without naming it, keep "the project" — do NOT invent a name
 
 EXAMPLES:
 

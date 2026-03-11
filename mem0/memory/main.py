@@ -457,6 +457,17 @@ class Memory(MemoryBase):
             logger.error(f"Error in new_retrieved_facts: {e}")
             new_retrieved_facts = []
 
+        # Normalize "the user" / "User" references to the actual user name
+        if new_retrieved_facts and filters.get("user_id"):
+            _uid = filters["user_id"]
+            import re as _re
+            _the_user_re = _re.compile(r'\b[Tt]he\s+[Uu]ser\b')
+            _bare_user_re = _re.compile(r'(?<!\w)User(?!\w|[_-])')
+            new_retrieved_facts = [
+                _bare_user_re.sub(_uid, _the_user_re.sub(_uid, fact))
+                for fact in new_retrieved_facts
+            ]
+
         if not new_retrieved_facts:
             logger.debug("No new facts retrieved from input. Skipping memory update LLM call.")
 
@@ -1507,6 +1518,17 @@ class AsyncMemory(MemoryBase):
         except Exception as e:
             logger.error(f"Error in new_retrieved_facts: {e}")
             new_retrieved_facts = []
+
+        # Normalize "the user" / "User" references to the actual user name
+        if new_retrieved_facts and effective_filters.get("user_id"):
+            _uid = effective_filters["user_id"]
+            import re as _re
+            _the_user_re = _re.compile(r'\b[Tt]he\s+[Uu]ser\b')
+            _bare_user_re = _re.compile(r'(?<!\w)User(?!\w|[_-])')
+            new_retrieved_facts = [
+                _bare_user_re.sub(_uid, _the_user_re.sub(_uid, fact))
+                for fact in new_retrieved_facts
+            ]
 
         if not new_retrieved_facts:
             logger.debug("No new facts retrieved from input. Skipping memory update LLM call.")

@@ -24,6 +24,26 @@ def _strip_json_fences(text):
         if text.rstrip().endswith('```'):
             text = text.rstrip()[:-3].rstrip()
     return text
+
+
+# Pattern: "The user" / "the user" / "The User" at word boundary → "Steven"
+_THE_USER_RE = re.compile(r"\bthe user(?:'s)?\b", re.IGNORECASE)
+_BARE_USER_RE = re.compile(r"(?<!\w)User(?:'s)?(?!\w)")  # bare "User" (not "username" etc.)
+
+
+def _normalize_user_refs(facts: list, user_name: str = "Steven") -> list:
+    """Replace 'the user' / 'User' with the actual user name in extracted facts."""
+    result = []
+    for f in facts:
+        if not isinstance(f, str):
+            result.append(f)
+            continue
+        f = _THE_USER_RE.sub(lambda m: user_name + ("'s" if m.group().endswith("'s") else ""), f)
+        f = _BARE_USER_RE.sub(lambda m: user_name + ("'s" if m.group().endswith("'s") else ""), f)
+        result.append(f)
+    return result
+
+
 from dataclasses import dataclass
 
 from app.database import SessionLocal
@@ -276,6 +296,7 @@ class EnhancedMemoryManager:
                 user_id=user_id,
                 client_name=client_name,
             )
+            new_facts = _normalize_user_refs(new_facts)
 
         # 3. Compare with existing facts
         existing_facts = []
@@ -458,6 +479,7 @@ class EnhancedMemoryManager:
                 user_message=user_message,
                 llm_response=llm_response,
             )
+            reviewed_facts = _normalize_user_refs(reviewed_facts)
 
             result["extracted_memories"] = reviewed_facts
 

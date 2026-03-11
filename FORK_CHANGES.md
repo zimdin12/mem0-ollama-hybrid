@@ -126,6 +126,10 @@ Three optimized prompts:
 - Added `graph: bool = True` parameter to `Memory.add()`
 - When `graph=False`, skips graph extraction in the ThreadPoolExecutor
 - Allows per-fact vector storage without redundant per-fact graph calls
+- **User reference normalization**: After LLM fact extraction, normalizes "the user" / "User"
+  references to the actual `user_id` (e.g., "User prefers dark mode" → "steven prefers dark mode").
+  Applied in both sync `Memory` and async `AsyncMemory` classes. This is the definitive fix —
+  catches cases where the LLM ignores prompt instructions about using the user's name.
 
 ### `mem0/memory/graph_memory.py`
 - **Entity list bug fix**: When `custom_prompt` was set, the user message omitted the
