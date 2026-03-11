@@ -313,20 +313,33 @@ class EnhancedMemoryManager:
         #    - Do ONE batched graph extraction with the full original text
         if novel_facts:
             all_results = []
+            failed_facts = []
             for fact in novel_facts:
-                try:
-                    # infer=False: skip LLM re-extraction
-                    # graph=False: skip graph extraction per-fact (we batch it below)
-                    response = self.memory_client.add(
-                        [{"role": "user", "content": fact}],
-                        user_id=user_id,
-                        metadata=metadata or {},
-                        infer=False,
-                        graph=False,
-                    )
-                    all_results.extend(response.get('results', []))
-                except Exception as e:
-                    logging.warning(f"Failed to add fact '{fact[:50]}': {e}")
+                last_err = None
+                for attempt in range(3):
+                    try:
+                        # infer=False: skip LLM re-extraction
+                        # graph=False: skip graph extraction per-fact (we batch it below)
+                        response = self.memory_client.add(
+                            [{"role": "user", "content": fact}],
+                            user_id=user_id,
+                            metadata=metadata or {},
+                            infer=False,
+                            graph=False,
+                        )
+                        all_results.extend(response.get('results', []))
+                        last_err = None
+                        break
+                    except Exception as e:
+                        last_err = e
+                        if attempt < 2:
+                            import time
+                            wait = 2 ** attempt  # 1s, 2s
+                            logging.warning(f"Embedding failed for '{fact[:50]}' (attempt {attempt+1}/3, retry in {wait}s): {e}")
+                            time.sleep(wait)
+                if last_err:
+                    logging.error(f"Failed to add fact after 3 attempts: '{fact[:50]}': {last_err}")
+                    failed_facts.append(fact)
 
             try:
                 if hasattr(self.memory_client, 'enable_graph') and self.memory_client.enable_graph:
@@ -343,8 +356,13 @@ class EnhancedMemoryManager:
 
             response = {'results': all_results}
 
+            stored_count = len(all_results)
             status = "new" if not existing_memories else "updated"
-            summary = f"Added {len(novel_facts)} new facts. Found {len(existing_facts)} existing related facts."
+            if failed_facts:
+                status = "partial_failure" if stored_count > 0 else "error"
+                summary = f"Stored {stored_count}/{len(novel_facts)} facts ({len(failed_facts)} failed — embedding service may be unavailable)."
+            else:
+                summary = f"Added {stored_count} new facts. Found {len(existing_facts)} existing related facts."
 
             return MemoryAdditionResult(
                 added_memories=response.get('results', []) if response else [],

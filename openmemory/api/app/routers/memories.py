@@ -443,6 +443,9 @@ async def create_memory(
             ],
             "summary": add_result.summary,
         }
+        if add_result.status == "error":
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=503, content=response)
         return response
 
     # Simple mode: raw mem0 add
