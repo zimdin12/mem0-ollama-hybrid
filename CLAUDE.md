@@ -1,6 +1,6 @@
-# OpenMemory — Local Hybrid Memory System (Ollama Fork)
+# OpenMemory — Local Hybrid Memory System
 
-A mem0 fork that runs 100% locally using Ollama. Provides hybrid memory (vector + graph + temporal) for AI assistants.
+A mem0 fork that runs 100% locally using any OpenAI-compatible LLM backend (llama.cpp, Ollama, etc.). Provides hybrid memory (vector + graph + temporal) for AI assistants.
 
 **Branch: `memory_agent` (v2)** — Single `memory_agent` MCP tool powered by an autonomous brain agent.
 

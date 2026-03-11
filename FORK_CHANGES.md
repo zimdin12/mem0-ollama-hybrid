@@ -1,6 +1,6 @@
 # Fork Changes: Ollama + Hybrid Memory (Local-Only Mode)
 
-All changes in this fork (`mem0-ollama-hybrid`) relative to upstream
+All changes in this fork relative to upstream
 [mem0ai/mem0](https://github.com/mem0ai/mem0).
 
 **Goal**: Run OpenMemory fully locally using Ollama (no OpenAI dependency), with hybrid

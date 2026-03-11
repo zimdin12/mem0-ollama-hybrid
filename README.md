@@ -1,6 +1,6 @@
 # mem0 — Local Hybrid Memory (Ollama Fork)
 
-Fork of [mem0ai/mem0](https://github.com/mem0ai/mem0) that runs **100% locally** using Ollama. No OpenAI, no cloud APIs, no API keys needed.
+Fork of [mem0ai/mem0](https://github.com/mem0ai/mem0) that runs **100% locally** using any OpenAI-compatible LLM backend (llama.cpp, Ollama, etc.). No cloud APIs or API keys needed.
 
 Provides a persistent hybrid memory system (vector + graph) for AI assistants, agents, and coding tools.
 
@@ -64,14 +64,14 @@ See `TESTING_GUIDE.md` section 7 for how to evaluate and switch models.
 
 ### As part of OpenClaw (recommended)
 
-This repo is used as a git submodule in [openclaw-adv-mem-local](https://github.com/zimdin12/openclaw-adv-mem-local). The parent repo's `docker-compose.yml` defines all services (Qdrant, Neo4j, Ollama, API, UI) with the correct networking and env vars. **Do not use the `openmemory/` compose files** when running inside the parent stack.
+This repo is used as a git submodule in [aify-openmemory](https://github.com/zimdin12/aify-openmemory). The parent repo's `docker-compose.yml` defines all services (Qdrant, Neo4j, API, UI) with the correct networking and env vars. **Do not use the `openmemory/` compose files** when running inside the parent stack.
 
 ### Standalone
 
 ```bash
 # 1. Clone
-git clone https://github.com/zimdin12/mem0-ollama-hybrid.git
-cd mem0-ollama-hybrid
+git clone https://github.com/zimdin12/aify-openmemory.git
+cd aify-openmemory/mem0-fork
 
 # 2. Pull Ollama models (requires Ollama running on the host)
 ollama pull qwen3.5:4b
