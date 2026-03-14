@@ -128,56 +128,25 @@ const TOOLS = [
 // ---------------------------------------------------------------------------
 
 async function handleSearch({ query, limit = 5 }) {
-  // Vector search
-  const result = await api("/api/v1/memories/", {
-    params: { user_id: USER_ID, search_query: query, size: String(limit) },
+  // Hybrid search (vector + graph + temporal) with relevance scoring
+  const result = await api("/api/v1/memories/search/", {
+    method: "POST",
+    body: { query, user_id: USER_ID, limit },
   });
-  const memories = result?.items || [];
 
-  // Graph context (optional, don't fail if unavailable)
-  let graphText = "";
-  try {
-    const graph = await api(`/api/v1/memories/graph/context/${encodeURIComponent(query)}`, {
-      params: { user_id: USER_ID },
-    });
-    const parts = [];
-    if (graph?.root_entities?.length) {
-      parts.push(`Entities: ${graph.root_entities.join(", ")}`);
-    }
-    if (graph?.related_entities) {
-      for (const [dist, entities] of Object.entries(graph.related_entities)) {
-        parts.push(`Distance ${dist}: ${entities.map((e) => `${e.name} (${e.type})`).join(", ")}`);
-      }
-    }
-    if (graph?.memories?.length) {
-      parts.push("Graph memories:");
-      for (const m of graph.memories.slice(0, 3)) {
-        parts.push(`- ${m.content.slice(0, 200)}`);
-      }
-    }
-    if (parts.length) graphText = parts.join("\n");
-  } catch {
-    // graph search is optional
-  }
-
-  if (!memories.length && !graphText) {
+  const memories = result?.results || [];
+  if (!memories.length) {
     return "No memories found. Use mem_store to save new memories.";
   }
 
-  let text = "";
-  if (memories.length) {
-    text += memories
-      .map((m, i) => {
-        const cats = m.categories?.length ? ` [${m.categories.join(", ")}]` : "";
-        const id = m.id ? ` (id: ${m.id})` : "";
-        return `### Memory ${i + 1}${cats}${id}\n${m.content}`;
-      })
-      .join("\n\n");
-  }
-  if (graphText) {
-    text += `\n\n### Graph Context\n${graphText}`;
-  }
-  return text;
+  return memories
+    .map((m, i) => {
+      const score = m.score ? ` (${m.score.toFixed(3)})` : "";
+      const src = m.source ? ` [${m.source}]` : "";
+      const id = m.id ? ` (id: ${m.id})` : "";
+      return `${i + 1}. ${m.memory}${score}${src}${id}`;
+    })
+    .join("\n");
 }
 
 async function handleStore({ text, metadata = {} }) {

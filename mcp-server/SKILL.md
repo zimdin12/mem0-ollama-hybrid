@@ -1,56 +1,46 @@
 ---
 name: openmemory
-description: Memory Agent — talk to the memory system in natural language. It autonomously searches, stores, deletes, and updates memories across vector, graph, and temporal databases.
+description: Hybrid memory system (vector + graph + temporal). Use search_memory, add_memories, delete_memories, get_related_memories tools to recall, store, and explore persistent knowledge.
 ---
 
-# OpenMemory — Memory Agent (v2)
+# OpenMemory — Persistent Memory for Claude Code
 
-You have access to a Memory Agent — an autonomous LLM that manages a persistent hybrid memory system (vector + graph + temporal). Talk to it in natural language. It determines intent and chains database operations as needed.
+Hybrid memory system across sessions. Stores facts, preferences, project context, people, and decisions in vector + graph databases. Use the direct tools below — they are fast (~100ms search, ~1s store).
 
-## MCP Tool
+## Tools (use these)
 
-| Tool | When to use |
-|------|------------|
-| `memory_agent` | All memory operations. Search, store, delete, update, explore relationships — describe what you need in natural language. |
+| Tool | When |
+|------|------|
+| `mem_search` | Recall facts. Start of conversation, when user references past context, or when you need project/person info. |
+| `mem_store` | Save durable facts: preferences, project decisions, environment details, people, lessons learned. |
+| `mem_forget` | Delete outdated or incorrect memories by ID. |
+| `mem_related` | Explore entity connections in the knowledge graph. |
 
-**Examples:**
-- Search: "What GPU does Steven use?", "What do we know about the Echoes project?"
-- Store: "Steven has a girlfriend called Mirjam", "The project uses PostgreSQL for production"
-- Update: "Steven switched from UE5 to Godot", "Steven upgraded to RTX 5090"
-- Delete: "Delete all memories about dark mode", "Remove the memory about PHP"
-- Explore: "How is Steven connected to Echoes of the Fallen?", "What tools does Steven use?"
-- Complex: "Tell me everything about Steven's hardware setup"
+## When to Search
 
-## When to Use Memory
+- **Start of conversation**: search for context about the current project or task
+- **User says "remember"/"recall"/"we discussed"**: search for what they're referring to
+- **Before making assumptions**: check if there's stored context about the user's setup
 
-### Start of Conversation
-Ask the memory agent about context relevant to the current task:
-- "What do we know about Steven's preferences?"
-- "What's stored about this project?"
+## When to Store
 
-### During Conversation
-When the user shares durable information — facts useful in future sessions:
-- Preferences, project decisions, environment facts, people, lessons learned
+Store facts that would be useful in **future sessions**:
+- User preferences and decisions ("Steven prefers Vite over CRA")
+- Project architecture ("The app uses PostgreSQL with PostGIS")
+- People and relationships ("Mirjam is Steven's girlfriend")
+- Environment facts ("RTX 4090 with 24GB VRAM")
+- Lessons learned ("Queue worker needs --timeout=0 for Redis keepalive")
 
-Tell the memory agent in natural language: "Remember that Steven prefers dark mode in all editors"
-
-### Corrections and Updates
-Tell the agent directly: "Steven no longer uses Godot, he switched to Unreal Engine 5"
-
-The agent will search for the old fact, delete it, and store the updated version.
+**Don't store**: ephemeral task state, code snippets, things derivable from the codebase.
 
 ## How to Store Well
 
-When telling the agent to remember something, use **concise, self-contained statements** with specific names:
+Use **concise, self-contained statements** with specific names:
+- Good: `mem_store("Steven prefers TypeScript over JavaScript for new projects")`
+- Bad: `mem_store("he likes TS")` — who? compared to what?
 
-- Good: "Remember that Steven prefers TypeScript over JavaScript for new projects"
-- Bad: "Remember he likes TS" (who? compared to what?)
-- Good: "Remember that Echoes of the Fallen uses dual contouring for terrain"
-- Bad: "Remember it uses dual contouring" (what project?)
+## Advanced: Memory Agent
 
-## Conversation Memory Mode
-
-When the user says **"use conversation memory"**, call `memory_agent` after every turn:
-- "Process this conversation: user said '...', assistant responded '...'"
-- The agent extracts facts, deduplicates, and stores automatically
-- Continue until the user says to stop
+| Tool | When |
+|------|------|
+| `memory_agent` | Complex operations: corrections ("Steven switched from X to Y"), batch deletes, or when you need the system to reason about what to search/store/update. Slower (~5s) — uses LLM reasoning. |

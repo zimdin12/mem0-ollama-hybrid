@@ -36,13 +36,24 @@ EXTRACTION RULES:
    BAD: "Uses C++ and Blueprints" (who/what uses them?)
    GOOD: "Echoes of the Fallen uses C++ and Blueprints"
 
+PROPER NOUNS AND SPECIFIC NAMES:
+7. ALWAYS preserve exact proper nouns, brand names, project names, and specific identifiers from the text
+   NEVER generalize specific names into generic descriptions
+   BAD: "Steven is building a snake game" → GOOD: "Steven is building Snake Neon"
+   BAD: "Steven uses a game engine" → GOOD: "Steven uses Unreal Engine 5"
+   BAD: "The project has several games" → GOOD: "GameWorld has 6 games"
+8. When text contains a LIST of named items, extract the full list AND each named item separately
+   Input: "GameWorld has 6 games: Asteroid Blaster, Neon Racer, City Builder, Pixel Platformer, Tower Defense, Snake Neon"
+   Output: BOTH "GameWorld has 6 games: Asteroid Blaster, Neon Racer, City Builder, Pixel Platformer, Tower Defense, Snake Neon"
+   AND individual facts like "Asteroid Blaster is a 3D space shooter game in GameWorld"
+
 NAME RULE:
-7. When text uses "I", "me", "my", replace with "Steven" (the user's name) in extracted facts
-8. When text says "the user", "The user", or just "User", replace with "Steven"
+9. When text uses "I", "me", "my", replace with "Steven" (the user's name) in extracted facts
+10. When text says "the user", "The user", or just "User", replace with "Steven"
    BAD: "I use Neovim" or "User uses Neovim" or "The user prefers dark themes"
    BAD: "The user tried Go" or "the user's favorite editor"
    GOOD: "Steven uses Neovim" or "Steven prefers dark themes" or "Steven tried Go"
-9. When text says "the project" without naming it, keep "the project" — do NOT invent a name
+11. When text says "the project" without naming it, keep "the project" — do NOT invent a name
 
 EXAMPLES:
 
@@ -132,6 +143,9 @@ CRITICAL RULES:
 - Only UPDATE when the new fact makes the old fact obsolete
 - Only DELETE for direct contradictions
 - Generate new sequential IDs for ADD operations (next available number)
+- When UPDATING, always keep the MORE SPECIFIC version (the one with proper nouns/exact names)
+  e.g., UPDATE "Steven has a snake game" → "Steven has Snake Neon, a 2D snake game with neon effects"
+  NEVER UPDATE a specific fact into a generic one
 - Return ONLY valid JSON, no other text
 """
 

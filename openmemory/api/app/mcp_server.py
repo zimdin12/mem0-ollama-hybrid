@@ -58,7 +58,7 @@ mcp_router = APIRouter(prefix="/mcp")
 # Initialize SSE transport
 sse = SseServerTransport("/mcp/messages/")
 
-@mcp.tool(description="Store new memories. Send facts as one fact per line — each line should be a complete, self-contained statement that includes the subject (person, project, or entity name). Example format:\n'Steven prefers local-first AI solutions without cloud dependencies.\nEchoes of the Fallen uses Voxel Plugin 2.0 for UE5 with Nanite support.\nThe OpenClaw gateway runs on port 3000 inside Docker.'\nThe system deduplicates against existing memories and only stores truly new information.")
+@mcp.tool(description="Store facts to persistent memory (vector + graph). One fact per line, each self-contained with its subject. The system deduplicates against existing memories.\nExample:\nSteven prefers dark mode and local-first AI.\nEchoes of the Fallen uses Unreal Engine 5 with Nanite.\nThe gateway runs on port 3000 inside Docker.")
 async def add_memories(text: str) -> str:
     uid = user_id_var.get(None)
     client_name = client_name_var.get(None)
@@ -134,7 +134,7 @@ async def add_memories(text: str) -> str:
         return f"Error adding to memory: {e}"
 
 
-@mcp.tool(description="Search memories using hybrid vector + graph + temporal search. Returns up to 10 results per call. Use offset to paginate (e.g., offset=0 for first 10, offset=10 for next 10). Try different query angles for broader coverage (e.g., 'steven preferences', 'steven projects', 'steven tools').")
+@mcp.tool(description="Search persistent memory using hybrid vector + graph + temporal search. Returns up to 10 results ranked by relevance. Use offset for pagination. Each result includes content, score (0-1), and source (vector/graph/temporal). Try different query angles for broader coverage.")
 async def search_memory(query: str, offset: int = 0) -> str:
     uid = user_id_var.get(None)
     client_name = client_name_var.get(None)
@@ -222,7 +222,7 @@ async def search_memory(query: str, offset: int = 0) -> str:
         return f"Error searching memory: {e}"
 
 
-@mcp.tool(description="List all memories in the user's memory")
+@mcp.tool(description="List all stored memories. Returns all facts in the memory database. For targeted retrieval, use search_memory instead.")
 async def list_memories() -> str:
     uid = user_id_var.get(None)
     client_name = client_name_var.get(None)
@@ -291,7 +291,7 @@ async def list_memories() -> str:
         return f"Error getting memories: {e}"
 
 
-@mcp.tool(description="Delete specific memories by their IDs")
+@mcp.tool(description="Delete specific memories by their IDs. Returns deleted items and related memories that may also need review.")
 async def delete_memories(memory_ids: list[str]) -> str:
     uid = user_id_var.get(None)
     client_name = client_name_var.get(None)
@@ -397,7 +397,7 @@ async def delete_memories(memory_ids: list[str]) -> str:
         return f"Error deleting memories: {e}"
 
 
-@mcp.tool(description="Delete all memories in the user's memory")
+@mcp.tool(description="Delete ALL memories for the current user. This is irreversible. Use delete_memories for targeted deletion.")
 async def delete_all_memories() -> str:
     uid = user_id_var.get(None)
     client_name = client_name_var.get(None)
@@ -462,7 +462,7 @@ async def delete_all_memories() -> str:
         return f"Error deleting memories: {e}"
 
 
-@mcp.tool(description="Conversation memory — extracts and stores memorable facts from a conversation turn. Pass the user's message and your response. The system extracts facts, reviews them with an LLM (fixes missing context, drops noise), deduplicates, and stores. Session context is tracked automatically — no need to pass conversation history. For bulk pre-formatted facts, use add_memories instead.")
+@mcp.tool(description="Extract and store facts from a conversation turn. Pass the user's message and your response. The system automatically extracts facts, fixes missing context, deduplicates, and stores new information. For pre-formatted facts, use add_memories instead.")
 async def conversation_memory(user_message: str, llm_response: str) -> str:
     """
     Conversation memory: regex extraction → LLM review → dedup → store.
@@ -550,7 +550,7 @@ async def conversation_memory(user_message: str, llm_response: str) -> str:
         return f"Error processing conversation: {e}"
 
 
-@mcp.tool(description="Talk to the Memory Agent in natural language. It autonomously searches, stores, deletes, or updates memories across all 3 databases (vector, graph, metadata). Examples: 'What hobbies does Steven have?', 'Steven has a girlfriend called Mirjam', 'Delete all memories about dark mode', 'Steven switched from UE5 to Godot'. The agent determines intent and chains tool calls as needed. Returns a synthesized answer.")
+@mcp.tool(description="Natural language memory agent. Autonomously searches, stores, deletes, or updates memories. Handles complex operations that span multiple databases. Examples: 'What does Steven work on?', 'Remember that Steven switched to Godot', 'Delete everything about dark mode'. Returns a synthesized answer with the steps taken.")
 async def memory_agent(request: str) -> str:
     """Natural language memory operations via brain agent."""
     uid = user_id_var.get(None)
@@ -578,7 +578,7 @@ async def memory_agent(request: str) -> str:
         return f"Error: {e}"
 
 
-@mcp.tool(description="Get memories related to specific entities or topics, with relationship traversal and contextual connections.")
+@mcp.tool(description="Find memories related to a topic via graph relationship traversal. Returns results grouped by: direct semantic matches, graph connections (related entities), and temporal context (recent memories). Good for exploring connections between entities.")
 async def get_related_memories(topic: str, max_depth: int = 2) -> str:
     """
     Find memories related to a specific topic with relationship traversal
@@ -633,6 +633,91 @@ async def get_related_memories(topic: str, max_depth: int = 2) -> str:
     except Exception as e:
         logging.exception(f"Error getting related memories: {e}")
         return f"Error getting related memories: {e}"
+
+
+@mcp.tool(description="Check memory system health and statistics. Returns: total memories, storage status (Qdrant, Neo4j, SQLite), last update time, and memory count breakdown by source app. No parameters needed.")
+async def memory_status() -> str:
+    """Return memory system health and statistics."""
+    uid = user_id_var.get(None)
+    if not uid:
+        return "Error: user_id not provided"
+
+    status = {
+        "user_id": uid,
+        "stores": {},
+        "counts": {},
+        "health": "ok",
+    }
+
+    # Check SQLite (always available)
+    try:
+        db = SessionLocal()
+        try:
+            from sqlalchemy import func
+            total = db.query(func.count(Memory.id)).filter(
+                Memory.state == MemoryState.active
+            ).scalar() or 0
+
+            # Get per-app breakdown
+            from app.models import App
+            app_counts = (
+                db.query(App.name, func.count(Memory.id))
+                .join(Memory, Memory.app_id == App.id)
+                .filter(Memory.state == MemoryState.active)
+                .group_by(App.name)
+                .all()
+            )
+            status["counts"]["total_memories"] = total
+            status["counts"]["by_app"] = {name: count for name, count in app_counts}
+
+            # Last update
+            latest = db.query(func.max(Memory.updated_at)).filter(
+                Memory.state == MemoryState.active
+            ).scalar()
+            status["last_updated"] = latest.isoformat() if latest else None
+            status["stores"]["sqlite"] = "ok"
+        finally:
+            db.close()
+    except Exception as e:
+        status["stores"]["sqlite"] = f"error: {e}"
+        status["health"] = "degraded"
+
+    # Check Qdrant
+    try:
+        from qdrant_client import QdrantClient
+        import os
+        qdrant_url = os.getenv("QDRANT_HOST", "localhost")
+        qdrant_port = int(os.getenv("QDRANT_PORT", "6333"))
+        qc = QdrantClient(host=qdrant_url, port=qdrant_port, timeout=5)
+        collection = qc.get_collection("openmemory")
+        status["stores"]["qdrant"] = "ok"
+        status["counts"]["qdrant_vectors"] = collection.points_count
+    except Exception as e:
+        status["stores"]["qdrant"] = f"error: {e}"
+        status["health"] = "degraded"
+
+    # Check Neo4j
+    try:
+        from neo4j import GraphDatabase
+        import os
+        neo4j_url = os.getenv("NEO4J_URL", "bolt://localhost:7687")
+        neo4j_user = os.getenv("NEO4J_USER", "neo4j")
+        neo4j_pass = os.getenv("NEO4J_PASSWORD", "openmemory")
+        driver = GraphDatabase.driver(neo4j_url, auth=(neo4j_user, neo4j_pass))
+        with driver.session() as session:
+            result = session.run("MATCH (n) RETURN count(n) as count")
+            node_count = result.single()["count"]
+            result2 = session.run("MATCH ()-[r]->() RETURN count(r) as count")
+            rel_count = result2.single()["count"]
+        driver.close()
+        status["stores"]["neo4j"] = "ok"
+        status["counts"]["graph_nodes"] = node_count
+        status["counts"]["graph_relationships"] = rel_count
+    except Exception as e:
+        status["stores"]["neo4j"] = f"error: {e}"
+        status["health"] = "degraded"
+
+    return json.dumps(status, indent=2)
 
 
 @mcp_router.get("/{client_name}/sse/{user_id}")

@@ -197,7 +197,7 @@ class EnhancedMemoryManager:
                 
                 # Search for related entities and relationships
                 for entity in entities:
-                    related = self._find_related_entities(entity, user_id)
+                    related = self._find_related_entities(entity, user_id, query_text=query)
                     for rel in related:
                         results.append(MemorySearchResult(
                             id=rel.get('id', str(uuid.uuid4())),
@@ -240,12 +240,19 @@ class EnhancedMemoryManager:
                 for memory in recent_memories:
                     age_days = (current_time - memory.created_at).days
                     recency_score = max(0.3, 1.0 - (age_days / 30))  # Decay over 30 days
-                    
-                    # Simple relevance check
+
+                    # Text relevance check — require meaningful overlap
                     relevance = self._calculate_text_relevance(query, memory.content)
+
+                    # Gate: skip if text relevance is too low (< 0.25 = less than
+                    # 1-in-4 query words match).  Without this gate, any recent
+                    # memory with a single common word ("steven", "the") passes.
+                    if relevance < 0.25:
+                        continue
+
                     combined_score = (recency_score * 0.3) + (relevance * 0.7)
-                    
-                    if combined_score > 0.4:  # Threshold for inclusion
+
+                    if combined_score > 0.45:  # Threshold for inclusion
                         results.append(MemorySearchResult(
                             id=str(memory.id),
                             content=memory.content,
@@ -708,8 +715,14 @@ Return empty list if nothing is worth remembering: {{"facts": []}}"""
         entities = [w for w in words if len(w) > 2 and w not in stopwords]
         return entities[:5]
     
-    def _find_related_entities(self, entity: str, user_id: str) -> List[Dict]:
-        """Find entities related to given entity in Neo4j graph"""
+    def _find_related_entities(self, entity: str, user_id: str, query_text: str = "") -> List[Dict]:
+        """Find entities related to given entity in Neo4j graph.
+
+        Scores graph results by actual text relevance to the search query
+        instead of using a fixed score.  Short/generic triples (e.g.
+        "steven uses minecraft") are penalised so they don't outrank
+        specific vector results.
+        """
         results = []
         try:
             if not (hasattr(self.memory_client, 'graph') and self.memory_client.graph):
@@ -724,24 +737,44 @@ Return empty list if nothing is worth remembering: {{"facts": []}}"""
             if not driver:
                 return results
 
-            query = """
+            cypher = """
             MATCH (n)-[r]->(m)
             WHERE (toLower(n.name) CONTAINS toLower($entity)
                    OR toLower(m.name) CONTAINS toLower($entity))
             AND n.name <> m.name
             RETURN n.name AS source, type(r) AS relationship, m.name AS target
-            LIMIT 5
+            LIMIT 10
             """
             with driver.session() as session:
-                records = session.run(query, entity=entity)
+                records = session.run(cypher, entity=entity)
                 for record in records:
                     src = record['source'].replace('_', ' ')
                     rel = record['relationship'].replace('_', ' ')
                     tgt = record['target'].replace('_', ' ')
                     content = f"{src} {rel} {tgt}"
+
+                    # --- Score by actual relevance to the search query ---
+                    if query_text:
+                        relevance = self._calculate_text_relevance(query_text, content)
+                    else:
+                        relevance = self._calculate_text_relevance(entity, content)
+
+                    # Penalise very short/generic triples (< 5 words)
+                    word_count = len(content.split())
+                    if word_count < 5:
+                        relevance *= 0.6
+
+                    # Graph results get a base of 0.25 + up to 0.35 from relevance,
+                    # capping at 0.60 so they never outrank strong vector hits.
+                    score = min(0.60, 0.25 + relevance * 0.35)
+
+                    # Skip graph results with near-zero relevance to the query
+                    if score < 0.30:
+                        continue
+
                     results.append({
                         'content': content,
-                        'relevance': 0.65,
+                        'relevance': round(score, 3),
                         'relationships': [
                             {'source': record['source'], 'rel': record['relationship'], 'target': record['target']}
                         ]
@@ -1016,18 +1049,39 @@ Return empty list if nothing is worth remembering: {{"facts": []}}"""
         
         return patterns
     
+    @staticmethod
+    def _jaccard_similarity(a: str, b: str) -> float:
+        """Token-level Jaccard similarity between two strings."""
+        tokens_a = set(a.lower().split())
+        tokens_b = set(b.lower().split())
+        if not tokens_a or not tokens_b:
+            return 0.0
+        intersection = tokens_a & tokens_b
+        union = tokens_a | tokens_b
+        return len(intersection) / len(union)
+
     def _deduplicate_and_rank(self, results: List[MemorySearchResult], limit: int) -> List[MemorySearchResult]:
         """Remove duplicates, interleave sources, and rank by relevance."""
-        # Deduplication by ID and content
+        # Deduplication by ID first
         seen_ids = set()
-        seen_content = set()
-        unique_results = []
-
+        id_unique = []
         for result in results:
-            content_key = result.content.lower().strip()[:60]
-            if result.id not in seen_ids and content_key not in seen_content:
+            if result.id not in seen_ids:
                 seen_ids.add(result.id)
-                seen_content.add(content_key)
+                id_unique.append(result)
+
+        # Semantic dedup using Jaccard similarity (within same source type)
+        # Cross-source duplicates are kept — vector and graph results carry different metadata
+        unique_results = []
+        for result in id_unique:
+            is_dup = False
+            for accepted in unique_results:
+                if result.source == accepted.source:
+                    sim = self._jaccard_similarity(result.content, accepted.content)
+                    if sim >= 0.85:
+                        is_dup = True
+                        break
+            if not is_dup:
                 unique_results.append(result)
 
         # Sort by score within each source
@@ -1039,10 +1093,11 @@ Return empty list if nothing is worth remembering: {{"facts": []}}"""
                                   key=lambda x: x.score, reverse=True)
 
         # Interleave: prioritize vector (most informative), then graph, then temporal
-        # Take up to 60% vector, 30% graph, 10% temporal
-        max_vector = max(1, int(limit * 0.6))
-        max_graph = max(1, int(limit * 0.3))
-        max_temporal = max(1, int(limit * 0.1))
+        # 75% vector, 15% graph, 10% temporal
+        # Graph triples are low-information ("X uses Y") — they supplement, not lead.
+        max_vector = max(1, int(limit * 0.75))
+        max_graph = max(1, int(limit * 0.15))
+        max_temporal = max(1, int(limit * 0.10))
 
         merged = []
         merged.extend(vector_results[:max_vector])

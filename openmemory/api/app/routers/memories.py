@@ -273,6 +273,62 @@ class SearchMemoriesRequest(BaseModel):
     offset: int = 0
 
 
+class ExtractQueryRequest(BaseModel):
+    prompt: str
+    user_id: str
+
+
+@router.post("/extract-query")
+async def extract_search_query(request: ExtractQueryRequest):
+    """Extract optimized search keywords from a user prompt using LLM."""
+    import time as _time
+    from openai import OpenAI
+
+    start = _time.time()
+    original = request.prompt[:500]
+
+    try:
+        ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://192.168.100.10:11434")
+        llm_model = os.environ.get("LLM_MODEL", "glm-4.7-flash")
+        client = OpenAI(base_url=f"{ollama_url}/v1", api_key="ollama")
+
+        resp = client.chat.completions.create(
+            model=llm_model,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Extract 3-8 search keywords from this message that would help find relevant memories. "
+                    "Focus on proper nouns, project names, technical terms, and specific details. "
+                    "Return ONLY a JSON object: {\"keywords\": [\"keyword1\", \"keyword2\"]}\n\n"
+                    f"Message: {original}"
+                ),
+            }],
+            temperature=0.1,
+            max_tokens=200,
+        )
+
+        import json as _json
+        raw = resp.choices[0].message.content.strip()
+        # Handle models that wrap in ```json blocks
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        parsed = _json.loads(raw)
+        keywords = parsed.get("keywords", [])
+        extracted = " ".join(keywords)
+    except Exception as e:
+        logging.warning(f"Keyword extraction failed, using raw query: {e}")
+        extracted = original
+        keywords = []
+
+    elapsed = (_time.time() - start) * 1000
+    return {
+        "original": original,
+        "extracted": extracted,
+        "keywords": keywords,
+        "elapsed_ms": round(elapsed),
+    }
+
+
 @router.post("/search")
 async def search_memories_hybrid(
     request: SearchMemoriesRequest,
