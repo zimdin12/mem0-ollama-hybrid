@@ -46,6 +46,26 @@ cd mcp-server && npm install
 claude mcp add openmemory -s user -- node mcp-server/server.js
 ```
 
+### Claude Desktop
+
+Add to your Claude Desktop config (Settings → Developer → Edit Config):
+
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "openmemory": {
+      "type": "sse",
+      "url": "http://localhost:8765/mcp/claude-code/sse/YOUR_USER_ID"
+    }
+  }
+}
+```
+
+Restart Claude Desktop after editing.
+
 ### Step 2 — Install the Skill
 
 The skill file tells Claude Code **when** and **how** to use the memory tools:
